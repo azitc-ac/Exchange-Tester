@@ -324,7 +324,23 @@ $bgWorker.Add_DoWork({
         if ($res.Code -eq 301 -or $res.Code -eq 302) {
             $loc = $res.Location
             if ($loc) { & $logLine "URL redirect to $loc at AutoDiscover." }
-            # Full redirect-follow logic added in Milestone 3
+            if ($loc -and $loc -match '^https://' -and $loc -match 'autodiscover') {
+                # Redirect points directly at an autodiscover endpoint — follow it
+                & $logLine "Redirect check for $loc starting."
+                $res2 = & $doPost $loc
+                if ($res2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res2.Code)." }
+                if ($res2.Code -eq 200) {
+                    & $logLine "AutoDiscover via $loc succeeded."
+                    return $res2.Body
+                }
+                & $logLine "Redirect check for $loc failed (0x800C8209)."
+            } elseif ($loc) {
+                # Non-autodiscover redirect target — GET to verify it's a real endpoint
+                & $logLine "Redirect check for $loc starting."
+                $res2 = & $doGet $loc
+                if ($res2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res2.Code)." }
+                & $logLine "Redirect check for $loc failed (0x800C8209)."
+            }
             & $logLine "AutoDiscover via $url failed (0x800C8204)."
             return $null
         }
@@ -360,8 +376,85 @@ $bgWorker.Add_DoWork({
         $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
     }
 
-    # Steps 4-6 (redirect check, SCP, DNS SRV) added in Milestone 3
+    # --- Step 4: SCP (Active Directory Service Connection Point) ---
     & $setPct 65
+    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+        & $logLine "Local AutoDiscover for $domain starting."
+        try {
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher
+            $searcher.Filter = "(&(objectClass=serviceConnectionPoint)(|(serviceBindingInformation=*autodiscover*)(keywords=67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68)))"
+            [void]$searcher.PropertiesToLoad.Add("serviceBindingInformation")
+            $scpHits = $searcher.FindAll()
+            if ($scpHits.Count -eq 0) {
+                & $logLine "Local AutoDiscover for $domain failed (0x8004010F)."
+            } else {
+                foreach ($hit in $scpHits) {
+                    $scpUrl = $hit.Properties["serviceBindingInformation"][0]
+                    & $logLine "SCP record: $scpUrl"
+                    $res = & $doPost $scpUrl
+                    if ($res.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res.Code)." }
+                    if ($res.Code -eq 200) {
+                        $foundXml = $res.Body
+                        & $logLine "Local AutoDiscover via SCP succeeded."
+                        break
+                    }
+                }
+                if (-not $foundXml) { & $logLine "Local AutoDiscover for $domain failed." }
+            }
+        } catch {
+            & $logLine "Local AutoDiscover for $domain failed (0x8004010F)."
+        }
+    }
+
+    # --- Step 5: HTTP redirect check (well-known URL) ---
+    & $setPct 78
+    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+        $rdUrl = "http://autodiscover.$domain/autodiscover/autodiscover.xml"
+        & $logLine "Redirect check for $rdUrl starting."
+        $res = & $doGet $rdUrl
+        if ($res.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res.Code)." }
+        if ($res.Location -and $res.Location -match '^https://') {
+            & $logLine "Redirect to $($res.Location) found."
+            $res2 = & $doPost $res.Location
+            if ($res2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res2.Code)." }
+            if ($res2.Code -eq 200) {
+                $foundXml = $res2.Body
+                & $logLine "AutoDiscover via HTTP redirect succeeded."
+            } else {
+                & $logLine "Redirect check for $rdUrl failed (0x80004005)."
+            }
+        } else {
+            & $logLine "Redirect check for $rdUrl failed (0x80004005)."
+        }
+    }
+
+    # --- Step 6: DNS SRV _autodiscover._tcp.<domain> ---
+    & $setPct 90
+    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+        & $logLine "DNS SRV lookup for $domain starting."
+        try {
+            $srvRecs = Resolve-DnsName -Name "_autodiscover._tcp.$domain" -Type SRV -ErrorAction Stop
+            $srvHit = $false
+            foreach ($srv in $srvRecs) {
+                if (-not $srv.NameTarget) { continue }
+                $srvUrl = "https://$($srv.NameTarget):$($srv.Port)/autodiscover/autodiscover.xml"
+                & $logLine "DNS SRV: $($srv.NameTarget):$($srv.Port)"
+                $res = & $doPost $srvUrl
+                if ($res.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res.Code)." }
+                if ($res.Code -eq 200) {
+                    $foundXml = $res.Body
+                    $srvHit   = $true
+                    & $logLine "AutoDiscover via DNS SRV succeeded."
+                    break
+                }
+            }
+            if (-not $srvHit) { & $logLine "DNS SRV lookup for $domain failed (0x8004010F)." }
+        } catch [System.Management.Automation.CommandNotFoundException] {
+            & $logLine "DNS SRV skipped (Resolve-DnsName requires Windows 8.1+)."
+        } catch {
+            & $logLine "DNS SRV lookup for $domain failed (0x8004010F)."
+        }
+    }
 
     if ($bwSender.CancellationPending) { $bwArgs.Cancel = $true; return }
 
