@@ -180,7 +180,251 @@ $tabXml.Controls.Add($rtbXml)
 #endregion
 
 #endregion ===================================================================
-#  CONTROL INTERACTIONS (UI-only, no test logic yet)
+#  BACKGROUND WORKER
+#==============================================================================
+
+$bgWorker = New-Object System.ComponentModel.BackgroundWorker
+$bgWorker.WorkerReportsProgress     = $true
+$bgWorker.WorkerSupportsCancellation = $true
+
+$bgWorker.Add_DoWork({
+    param($bwSender, $bwArgs)
+
+    $a          = $bwArgs.Argument
+    $email      = $a.Email
+    $password   = $a.Password
+    $useWinAuth = $a.UseWindowsAuth
+    $domain     = ($email -split '@')[1]
+
+    # Explicit credentials (Basic / NTLM with supplied password)
+    $netCred = $null
+    if (-not $useWinAuth -and $password -ne '') {
+        $netCred = New-Object System.Net.NetworkCredential($email, $password)
+    }
+
+    # AutoDiscover POST body
+    $bodyXml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
+  <Request>
+    <EMailAddress>$email</EMailAddress>
+    <AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>
+  </Request>
+</Autodiscover>
+"@
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyXml)
+
+    #region --- helpers (script blocks, capture outer scope via PS scope chain) ---
+
+    $logLine = {
+        param([string]$msg)
+        $bwSender.ReportProgress(0, [PSCustomObject]@{ Type = 'Log'; Text = $msg })
+    }
+
+    $setPct = {
+        param([int]$pct)
+        $bwSender.ReportProgress($pct, [PSCustomObject]@{ Type = 'Pct' })
+    }
+
+    # HTTP POST → @{Code; Body; Location; Error}
+    $doPost = {
+        param([string]$url)
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($url)
+            $req.Method            = "POST"
+            $req.ContentType       = "text/xml; charset=utf-8"
+            $req.ContentLength     = $bodyBytes.Length
+            $req.AllowAutoRedirect = $false
+            $req.Timeout           = 30000
+            $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
+            if ($useWinAuth) {
+                $req.UseDefaultCredentials = $true
+            } elseif ($netCred) {
+                $req.Credentials = $netCred
+            }
+            $s = $req.GetRequestStream()
+            $s.Write($bodyBytes, 0, $bodyBytes.Length)
+            $s.Close()
+            try {
+                $resp = $req.GetResponse()
+                $code = [int]$resp.StatusCode
+                $body = $null
+                if ($code -eq 200) {
+                    $rs   = $resp.GetResponseStream()
+                    $rdr  = New-Object System.IO.StreamReader($rs, [System.Text.Encoding]::UTF8)
+                    $body = $rdr.ReadToEnd()
+                    $rdr.Close()
+                }
+                $resp.Close()
+                return @{ Code = $code; Body = $body; Location = $null; Error = $null }
+            } catch [System.Net.WebException] {
+                $ex = $_.Exception
+                if ($ex.Response) {
+                    $code = [int]$ex.Response.StatusCode
+                    $loc  = $ex.Response.Headers["Location"]
+                    $ex.Response.Close()
+                    return @{ Code = $code; Body = $null; Location = $loc; Error = $null }
+                }
+                return @{ Code = -1; Body = $null; Location = $null; Error = $ex.Message }
+            }
+        } catch {
+            return @{ Code = -1; Body = $null; Location = $null; Error = $_.Exception.Message }
+        }
+    }
+
+    # HTTP GET → @{Code; Location; Error}
+    $doGet = {
+        param([string]$url)
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($url)
+            $req.Method            = "GET"
+            $req.AllowAutoRedirect = $false
+            $req.Timeout           = 15000
+            $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
+            try {
+                $resp = $req.GetResponse()
+                $code = [int]$resp.StatusCode
+                $loc  = $resp.Headers["Location"]
+                $resp.Close()
+                return @{ Code = $code; Location = $loc; Error = $null }
+            } catch [System.Net.WebException] {
+                $ex = $_.Exception
+                if ($ex.Response) {
+                    $code = [int]$ex.Response.StatusCode
+                    $loc  = $ex.Response.Headers["Location"]
+                    $ex.Response.Close()
+                    return @{ Code = $code; Location = $loc; Error = $null }
+                }
+                return @{ Code = -1; Location = $null; Error = $ex.Message }
+            }
+        } catch {
+            return @{ Code = -1; Location = $null; Error = $_.Exception.Message }
+        }
+    }
+
+    # Try one AutoDiscover POST URL; returns XML string on 200, $null otherwise
+    $tryUrl = {
+        param([string]$url)
+        & $logLine "AutoDiscover via $url starting."
+        $res = & $doPost $url
+
+        if ($res.Code -eq 200) {
+            & $logLine "GetLastError=0; httpStatus=200."
+            & $logLine "AutoDiscover via $url succeeded."
+            return $res.Body
+        }
+
+        if ($res.Code -ge 0) {
+            & $logLine "GetLastError=0; httpStatus=$($res.Code)."
+        } else {
+            & $logLine "AutoDiscover via $url failed: $($res.Error)"
+            return $null
+        }
+
+        if ($res.Code -eq 301 -or $res.Code -eq 302) {
+            $loc = $res.Location
+            if ($loc) { & $logLine "URL redirect to $loc at AutoDiscover." }
+            # Full redirect-follow logic added in Milestone 3
+            & $logLine "AutoDiscover via $url failed (0x800C8204)."
+            return $null
+        }
+
+        if ($res.Code -eq 401) {
+            & $logLine "AutoDiscover via $url failed (0x800C820E)."
+            return $null
+        }
+
+        & $logLine "AutoDiscover via $url failed (httpStatus=$($res.Code))."
+        return $null
+    }
+
+    #endregion
+
+    $foundXml = $null
+
+    # --- Step 1: O365 ---
+    & $setPct 10
+    if (-not $bwSender.CancellationPending) {
+        $foundXml = & $tryUrl "https://outlook.office365.com/autodiscover/autodiscover.xml"
+    }
+
+    # --- Step 2: https://<domain>/autodiscover/autodiscover.xml ---
+    & $setPct 30
+    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+        $foundXml = & $tryUrl "https://$domain/autodiscover/autodiscover.xml"
+    }
+
+    # --- Step 3: https://autodiscover.<domain>/autodiscover/autodiscover.xml ---
+    & $setPct 50
+    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+        $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
+    }
+
+    # Steps 4-6 (redirect check, SCP, DNS SRV) added in Milestone 3
+    & $setPct 65
+
+    if ($bwSender.CancellationPending) { $bwArgs.Cancel = $true; return }
+
+    & $setPct 100
+    $bwArgs.Result = [PSCustomObject]@{
+        Xml     = $foundXml
+        Success = ($null -ne $foundXml)
+    }
+})
+
+$bgWorker.Add_ProgressChanged({
+    param($sender, $e)
+    $state = $e.UserState
+    if ($state.Type -eq 'Log') {
+        $rtbLog.AppendText("$($state.Text)`r`n")
+        $rtbLog.ScrollToCaret()
+    } elseif ($state.Type -eq 'Pct') {
+        $v = $e.ProgressPercentage
+        if ($v -ge 0 -and $v -le 100) { $prgBar.Value = $v }
+    }
+})
+
+$bgWorker.Add_RunWorkerCompleted({
+    param($sender, $e)
+    $btnTest.Enabled   = $true
+    $btnCancel.Enabled = $false
+
+    if ($e.Cancelled) {
+        $rtbLog.AppendText("`r`nTest cancelled.`r`n")
+        return
+    }
+    if ($e.Error) {
+        $rtbLog.AppendText("`r`nUnhandled error: $($e.Error.Message)`r`n")
+        return
+    }
+
+    $res = $e.Result
+
+    if ($res.Xml) {
+        try {
+            $xd = New-Object System.Xml.XmlDocument
+            $xd.LoadXml($res.Xml)
+            $sb = New-Object System.Text.StringBuilder
+            $sw = New-Object System.IO.StringWriter($sb)
+            $xw = New-Object System.Xml.XmlTextWriter($sw)
+            $xw.Formatting  = [System.Xml.Formatting]::Indented
+            $xw.Indentation = 2
+            $xd.WriteTo($xw)
+            $xw.Flush()
+            $rtbXml.Text = $sb.ToString()
+        } catch {
+            $rtbXml.Text = $res.Xml
+        }
+        $tabCtrl.SelectedTab = $tabXml
+        $rtbLog.AppendText("`r`nAutoDiscover completed successfully.`r`n")
+    } else {
+        $rtbLog.AppendText("`r`nAutoDiscover failed for all tested methods.`r`n")
+        $tabCtrl.SelectedTab = $tabLog
+    }
+})
+
+#endregion ===================================================================
+#  CONTROL INTERACTIONS
 #==============================================================================
 
 $chkUseCurrentUser.Add_CheckedChanged({
@@ -202,28 +446,38 @@ $btnTest.Add_Click({
         return
     }
 
-    # Reset UI for new test run
+    # Certificate validation callback
+    if ($chkIgnoreCert.Checked) {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    } else {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+    }
+
+    # Reset UI
     $rtbLog.Clear()
     $rtbXml.Clear()
     $lvwResults.Items.Clear()
-    $prgBar.Value       = 0
-    $btnTest.Enabled    = $false
-    $btnCancel.Enabled  = $true
+    $prgBar.Value        = 0
+    $btnTest.Enabled     = $false
+    $btnCancel.Enabled   = $true
     $tabCtrl.SelectedTab = $tabLog
 
-    # ---- logic will be wired here in Milestone 2 ----
-    $rtbLog.AppendText("(Test logic not yet implemented - coming in Milestone 2)`r`n")
-    $btnTest.Enabled   = $true
-    $btnCancel.Enabled = $false
+    $bgWorker.RunWorkerAsync([PSCustomObject]@{
+        Email          = $email
+        Password       = $txtPass.Text
+        UseWindowsAuth = $chkUseCurrentUser.Checked
+    })
 })
 
 $btnCancel.Add_Click({
-    # ---- BackgroundWorker cancel will be wired in Milestone 2 ----
+    $bgWorker.CancelAsync()
     $btnCancel.Enabled = $false
+    $rtbLog.AppendText("Cancelling...`r`n")
 })
 
 $form.Add_FormClosing({
-    # ---- worker cleanup will be added in Milestone 2 ----
+    if ($bgWorker.IsBusy) { $bgWorker.CancelAsync() }
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 })
 
 #==============================================================================
