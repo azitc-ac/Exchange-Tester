@@ -145,6 +145,7 @@ $lvwResults.Dock          = [System.Windows.Forms.DockStyle]::Fill
 $lvwResults.View          = [System.Windows.Forms.View]::Details
 $lvwResults.FullRowSelect = $true
 $lvwResults.GridLines     = $true
+$lvwResults.ShowGroups    = $true
 $lvwResults.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
 [void]$lvwResults.Columns.Add("Setting", 220)
 [void]$lvwResults.Columns.Add("Value",   510)
@@ -178,6 +179,92 @@ $rtbXml.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::Both
 $rtbXml.WordWrap   = $false
 $tabXml.Controls.Add($rtbXml)
 #endregion
+
+#endregion ===================================================================
+#  XML PARSER
+#==============================================================================
+
+function ConvertFrom-AutodiscoverXml {
+    param([string]$RawXml)
+
+    $rows = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    try {
+        $xd = [xml]$RawXml
+        $ns = New-Object System.Xml.XmlNamespaceManager($xd.NameTable)
+        $ns.AddNamespace("ad", "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a")
+
+        # Returns inner text of first matching node, or $null
+        $txt = {
+            param($node, [string]$xpath)
+            $n = $node.SelectSingleNode($xpath, $ns)
+            if ($n) { $n.InnerText } else { $null }
+        }
+
+        $add = {
+            param([string]$group, [string]$setting, $value)
+            if ($value -and $value.Trim() -ne '') {
+                $rows.Add([PSCustomObject]@{ Group = $group; Setting = $setting; Value = $value.Trim() })
+            }
+        }
+
+        # --- User ---
+        $user = $xd.SelectSingleNode("//ad:User", $ns)
+        if ($user) {
+            & $add "User" "Display Name"  (& $txt $user "ad:DisplayName")
+            & $add "User" "Legacy DN"      (& $txt $user "ad:LegacyDN")
+            & $add "User" "Deployment ID"  (& $txt $user "ad:DeploymentId")
+        }
+
+        # --- Account ---
+        $account = $xd.SelectSingleNode("//ad:Account", $ns)
+        if ($account) {
+            $action = & $txt $account "ad:Action"
+            & $add "Account" "Account Type"     (& $txt $account "ad:AccountType")
+            & $add "Account" "Action"             $action
+            & $add "Account" "Redirect Address"  (& $txt $account "ad:RedirectAddr")
+            & $add "Account" "Redirect URL"      (& $txt $account "ad:RedirectUrl")
+        }
+
+        # --- Protocol sections (EXCH, EXPR, IMAP, POP3, SMTP, WEB, ...) ---
+        $protocols = $xd.SelectNodes("//ad:Protocol", $ns)
+        foreach ($proto in $protocols) {
+            $type = & $txt $proto "ad:Type"
+            if (-not $type) { $type = "Unknown" }
+            $grp = "Protocol: $type"
+
+            & $add $grp "Server"                  (& $txt $proto "ad:Server")
+            & $add $grp "Port"                    (& $txt $proto "ad:Port")
+            & $add $grp "SSL"                     (& $txt $proto "ad:SSL")
+            & $add $grp "Encryption"              (& $txt $proto "ad:Encryption")
+            & $add $grp "Login Name"              (& $txt $proto "ad:LoginName")
+            & $add $grp "Domain Required"         (& $txt $proto "ad:DomainRequired")
+            & $add $grp "Auth Required"           (& $txt $proto "ad:AuthRequired")
+            & $add $grp "Auth Package"            (& $txt $proto "ad:AuthPackage")
+            & $add $grp "EWS URL"                 (& $txt $proto "ad:EwsUrl")
+            & $add $grp "OAB URL"                 (& $txt $proto "ad:OABUrl")
+            & $add $grp "OOF URL"                 (& $txt $proto "ad:OOFUrl")
+            & $add $grp "ActiveSync URL"          (& $txt $proto "ad:ASUrl")
+            & $add $grp "EMWS URL"                (& $txt $proto "ad:EmwsUrl")
+            & $add $grp "Public Folder Server"    (& $txt $proto "ad:PublicFolderServer")
+            & $add $grp "Autodiscover Internal"   (& $txt $proto "ad:AutodiscoverServiceInternalUri")
+
+            # WEB protocol: OWA URLs are nested under Internal/External
+            $inOwa  = $proto.SelectSingleNode("ad:Internal/ad:OWAUrl",  $ns)
+            $extOwa = $proto.SelectSingleNode("ad:External/ad:OWAUrl", $ns)
+            if ($inOwa)  { & $add $grp "OWA URL (Internal)" $inOwa.InnerText }
+            if ($extOwa) { & $add $grp "OWA URL (External)" $extOwa.InnerText }
+        }
+    } catch {
+        $rows.Add([PSCustomObject]@{
+            Group   = "Error"
+            Setting = "XML parse error"
+            Value   = $_.Exception.Message
+        })
+    }
+
+    return ,$rows   # comma forces List to stay as-is, not unroll
+}
 
 #endregion ===================================================================
 #  BACKGROUND WORKER
@@ -494,6 +581,7 @@ $bgWorker.Add_RunWorkerCompleted({
     $res = $e.Result
 
     if ($res.Xml) {
+        # --- XML tab: pretty-print ---
         try {
             $xd = New-Object System.Xml.XmlDocument
             $xd.LoadXml($res.Xml)
@@ -508,8 +596,35 @@ $bgWorker.Add_RunWorkerCompleted({
         } catch {
             $rtbXml.Text = $res.Xml
         }
-        $tabCtrl.SelectedTab = $tabXml
+
+        # --- Results tab: parsed rows grouped by section ---
+        $rows = ConvertFrom-AutodiscoverXml -RawXml $res.Xml
+        $lvwResults.BeginUpdate()
+        $lvwResults.Items.Clear()
+        $lvwResults.Groups.Clear()
+
+        $groupMap = @{}
+        foreach ($row in $rows) {
+            if (-not $groupMap.ContainsKey($row.Group)) {
+                $lvg = New-Object System.Windows.Forms.ListViewGroup($row.Group, $row.Group)
+                [void]$lvwResults.Groups.Add($lvg)
+                $groupMap[$row.Group] = $lvg
+            }
+            $item = New-Object System.Windows.Forms.ListViewItem($row.Setting)
+            [void]$item.SubItems.Add($row.Value)
+            $item.Group = $groupMap[$row.Group]
+            [void]$lvwResults.Items.Add($item)
+        }
+        $lvwResults.EndUpdate()
+
         $rtbLog.AppendText("`r`nAutoDiscover completed successfully.`r`n")
+
+        # Switch to Results if we got data, otherwise XML
+        if ($rows.Count -gt 0) {
+            $tabCtrl.SelectedTab = $tabResults
+        } else {
+            $tabCtrl.SelectedTab = $tabXml
+        }
     } else {
         $rtbLog.AppendText("`r`nAutoDiscover failed for all tested methods.`r`n")
         $tabCtrl.SelectedTab = $tabLog
@@ -549,6 +664,7 @@ $btnTest.Add_Click({
     # Reset UI
     $rtbLog.Clear()
     $rtbXml.Clear()
+    $lvwResults.Groups.Clear()
     $lvwResults.Items.Clear()
     $prgBar.Value        = 0
     $btnTest.Enabled     = $false
