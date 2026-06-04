@@ -180,6 +180,63 @@ $rtbXml.WordWrap   = $false
 $tabXml.Controls.Add($rtbXml)
 #endregion
 
+#region --- Context menus for Log and XML ---
+
+# Shared items: Copy selection / Select All
+$ctxLog = New-Object System.Windows.Forms.ContextMenuStrip
+$miLogCopy = New-Object System.Windows.Forms.ToolStripMenuItem("Copy")
+$miLogCopy.ShortcutKeyDisplayString = "Ctrl+C"
+$miLogSelAll = New-Object System.Windows.Forms.ToolStripMenuItem("Select All")
+$miLogSelAll.ShortcutKeyDisplayString = "Ctrl+A"
+$miLogClear = New-Object System.Windows.Forms.ToolStripMenuItem("Clear Log")
+[void]$ctxLog.Items.Add($miLogCopy)
+[void]$ctxLog.Items.Add($miLogSelAll)
+[void]$ctxLog.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$ctxLog.Items.Add($miLogClear)
+$rtbLog.ContextMenuStrip = $ctxLog
+
+$miLogCopy.Add_Click({
+    $t = $rtbLog.SelectedText
+    if (-not $t) { $t = $rtbLog.Text }
+    if ($t) { [System.Windows.Forms.Clipboard]::SetText($t) }
+})
+$miLogSelAll.Add_Click({ $rtbLog.SelectAll() })
+$miLogClear.Add_Click({ $rtbLog.Clear() })
+
+$ctxXml = New-Object System.Windows.Forms.ContextMenuStrip
+$miXmlCopy   = New-Object System.Windows.Forms.ToolStripMenuItem("Copy")
+$miXmlCopy.ShortcutKeyDisplayString = "Ctrl+C"
+$miXmlSelAll = New-Object System.Windows.Forms.ToolStripMenuItem("Select All")
+$miXmlSelAll.ShortcutKeyDisplayString = "Ctrl+A"
+$miXmlSave   = New-Object System.Windows.Forms.ToolStripMenuItem("Save XML As...")
+[void]$ctxXml.Items.Add($miXmlCopy)
+[void]$ctxXml.Items.Add($miXmlSelAll)
+[void]$ctxXml.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$ctxXml.Items.Add($miXmlSave)
+$rtbXml.ContextMenuStrip = $ctxXml
+
+$miXmlCopy.Add_Click({
+    $t = $rtbXml.SelectedText
+    if (-not $t) { $t = $rtbXml.Text }
+    if ($t) { [System.Windows.Forms.Clipboard]::SetText($t) }
+})
+$miXmlSelAll.Add_Click({ $rtbXml.SelectAll() })
+$miXmlSave.Add_Click({
+    if (-not $rtbXml.Text) { return }
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter   = "XML Files (*.xml)|*.xml|All Files (*.*)|*.*"
+    $sfd.FileName = "autodiscover.xml"
+    if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        [System.IO.File]::WriteAllText($sfd.FileName, $rtbXml.Text, [System.Text.Encoding]::UTF8)
+        [System.Windows.Forms.MessageBox]::Show(
+            "Saved to:`n$($sfd.FileName)", "Saved",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+    }
+})
+#endregion
+
 #endregion ===================================================================
 #  XML PARSER
 #==============================================================================
@@ -570,10 +627,12 @@ $bgWorker.Add_RunWorkerCompleted({
     $btnCancel.Enabled = $false
 
     if ($e.Cancelled) {
+        $form.Text = "Test E-Mail AutoConfiguration"
         $rtbLog.AppendText("`r`nTest cancelled.`r`n")
         return
     }
     if ($e.Error) {
+        $form.Text = "Test E-Mail AutoConfiguration  —  Error"
         $rtbLog.AppendText("`r`nUnhandled error: $($e.Error.Message)`r`n")
         return
     }
@@ -617,6 +676,7 @@ $bgWorker.Add_RunWorkerCompleted({
         }
         $lvwResults.EndUpdate()
 
+        $form.Text = "Test E-Mail AutoConfiguration  —  OK"
         $rtbLog.AppendText("`r`nAutoDiscover completed successfully.`r`n")
 
         # Switch to Results if we got data, otherwise XML
@@ -626,6 +686,7 @@ $bgWorker.Add_RunWorkerCompleted({
             $tabCtrl.SelectedTab = $tabXml
         }
     } else {
+        $form.Text = "Test E-Mail AutoConfiguration  —  No configuration found"
         $rtbLog.AppendText("`r`nAutoDiscover failed for all tested methods.`r`n")
         $tabCtrl.SelectedTab = $tabLog
     }
@@ -662,6 +723,7 @@ $btnTest.Add_Click({
     }
 
     # Reset UI
+    $form.Text = "Test E-Mail AutoConfiguration  —  $email"
     $rtbLog.Clear()
     $rtbXml.Clear()
     $lvwResults.Groups.Clear()
