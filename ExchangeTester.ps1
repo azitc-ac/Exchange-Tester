@@ -135,15 +135,15 @@ $form.Controls.Add($lblClientId)
 $txtClientId = New-Object System.Windows.Forms.TextBox
 $txtClientId.Location  = New-Object System.Drawing.Point(122, 116)
 $txtClientId.Size      = New-Object System.Drawing.Size(490, 22)
-$txtClientId.Text      = ''
+$txtClientId.Text      = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'
 $txtClientId.Enabled   = $false
 $txtClientId.TabIndex  = 8
 $txtClientId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
 $form.Controls.Add($txtClientId)
 
 $toolTip = New-Object System.Windows.Forms.ToolTip
-$toolTip.SetToolTip($txtClientId, "Azure AD Application (client) ID. Register a free app at portal.azure.com — see README for steps.")
-$toolTip.SetToolTip($lblClientId, "Azure AD Application (client) ID. Register a free app at portal.azure.com — see README for steps.")
+$toolTip.SetToolTip($txtClientId, "Azure AD client ID used for the OAuth2 login popup. Default = Microsoft Office public client. Change only if your tenant has blocked it.")
+$toolTip.SetToolTip($lblClientId, "Azure AD client ID used for the OAuth2 login popup. Default = Microsoft Office public client. Change only if your tenant has blocked it.")
 #endregion
 
 #region --- Separator + Progress bar ---
@@ -478,23 +478,23 @@ $script:TestScript = {
     $tryModernAuth = $sync.ModernAuth
     $useSCP        = $sync.UseSCP
 
-    # Authorization Code Flow with PKCE — opens the default browser, user logs in
-    # normally (incl. MFA), AAD redirects to localhost, tool exchanges code for token.
-    # Uses the client ID from the form (defaults to Exchange Online PS module app).
+    # Authorization Code Flow with PKCE — embedded IE WebBrowser popup, no external browser.
+    # Intercepts the nativeclient redirect before it loads to capture the auth code.
+    # nativeclient is always valid as redirect URI for any public client — no app registration needed.
     $getToken = {
         param([string]$wwwAuthHeader)
+
+        Add-Type -AssemblyName System.Web
 
         # Normalize the authorization_uri from the Bearer challenge to v2.0
         $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
         if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
             $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
         }
-        $tokenUrl = $authUri -replace '/authorize', '/token'
-
-        $clientId    = if ($sync.ClientId) { $sync.ClientId } else { 'a0c73c16-a7e3-4564-9a95-2bdf47383716' }
+        $tokenUrl    = $authUri -replace '/authorize', '/token'
+        $clientId    = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
+        $redirectUri = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
         $scope       = 'https://outlook.office365.com/.default offline_access'
-        $port        = Get-Random -Minimum 49152 -Maximum 65534
-        $redirectUri = "http://localhost:$port"
 
         # PKCE: 48 random bytes → base64url code_verifier, SHA-256 → code_challenge
         $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
@@ -506,17 +506,6 @@ $script:TestScript = {
             $sha256.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($codeVerifier))
         ).TrimEnd('=').Replace('+','-').Replace('/','_')
 
-        # Start local HTTP listener for the redirect callback
-        $listener = New-Object System.Net.HttpListener
-        $listener.Prefixes.Add("$redirectUri/")
-        try {
-            $listener.Start()
-        } catch {
-            & $logLine "Modern Auth: could not start local listener on port $port — $($_.Exception.Message)"
-            return $null
-        }
-
-        # Build the full authorization URL and open the browser
         $state   = [Guid]::NewGuid().ToString("N")
         $authUrl = $authUri +
             "?client_id=$clientId" +
@@ -529,55 +518,61 @@ $script:TestScript = {
             "&state=$state" +
             "&prompt=select_account"
 
-        & $logLine "Modern Auth: opening browser for interactive login (port $port)…"
-        Start-Process $authUrl
+        & $logLine "Modern Auth: opening sign-in popup…"
 
-        # Wait for the redirect callback — check cancel every 500 ms
-        $asyncResult = $listener.BeginGetContext($null, $null)
-        $deadline    = (Get-Date).AddMinutes(5)
-        $got         = $false
-        while ((Get-Date) -lt $deadline -and -not $sync.Cancel) {
-            if ($asyncResult.AsyncWaitHandle.WaitOne(500)) { $got = $true; break }
-        }
-
-        if (-not $got) {
-            try { $listener.Stop() } catch {}
-            & $logLine "Modern Auth: browser login timed out or was cancelled."
-            return $null
-        }
-
-        # Receive the redirect and send a close-window page back to the browser
-        $code = $null; $cbErr = $null; $cbErrDesc = $null
+        # Force WebBrowser control to use IE11 rendering engine for this process
         try {
-            $ctx       = $listener.EndGetContext($asyncResult)
-            $code      = $ctx.Request.QueryString["code"]
-            $cbErr     = $ctx.Request.QueryString["error"]
-            $cbErrDesc = $ctx.Request.QueryString["error_description"]
-            $html      = if ($cbErr) {
-                "<html><body><h2>Authentication failed: $cbErr</h2><p>$cbErrDesc</p><p>You may close this window.</p></body></html>"
-            } else {
-                "<html><body><h2>Authentication complete.</h2><p>You may close this window and return to Exchange Tester.</p></body></html>"
-            }
-            $htmlBytes = [System.Text.Encoding]::UTF8.GetBytes($html)
-            $ctx.Response.ContentLength64 = $htmlBytes.Length
-            $ctx.Response.OutputStream.Write($htmlBytes, 0, $htmlBytes.Length)
-            $ctx.Response.Close()
+            $procName = [System.IO.Path]::GetFileName(
+                [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+            $feKey = "HKCU:\Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BROWSER_EMULATION"
+            if (-not (Test-Path $feKey)) { New-Item -Path $feKey -Force | Out-Null }
+            Set-ItemProperty -Path $feKey -Name $procName -Value 11001 -Type DWord
         } catch {}
-        try { $listener.Stop() } catch {}
 
-        if ($cbErr) {
-            & $logLine "Modern Auth: authorization error — ${cbErr}: $cbErrDesc"
+        # State bag shared between outer scope and WinForms event handlers
+        $ls = @{ Code = $null; Err = $null; ErrDesc = $null }
+
+        $loginForm = New-Object System.Windows.Forms.Form
+        $loginForm.Text          = "Sign in to Microsoft  —  Exchange Tester"
+        $loginForm.Size          = New-Object System.Drawing.Size(520, 660)
+        $loginForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+        $loginForm.MinimizeBox   = $false
+
+        $wb = New-Object System.Windows.Forms.WebBrowser
+        $wb.Dock                   = [System.Windows.Forms.DockStyle]::Fill
+        $wb.ScriptErrorsSuppressed = $true
+        $loginForm.Controls.Add($wb)
+
+        # Intercept the nativeclient redirect BEFORE the browser loads it
+        $wb.Add_Navigating({
+            param($s, $e)
+            $url = $e.Url.ToString()
+            if ($url -like 'https://login.microsoftonline.com/*/oauth2/nativeclient*') {
+                $qs         = [System.Web.HttpUtility]::ParseQueryString(([Uri]$url).Query)
+                $ls.Code    = $qs["code"]
+                $ls.Err     = $qs["error"]
+                $ls.ErrDesc = $qs["error_description"]
+                $e.Cancel   = $true
+                $loginForm.Close()
+            }
+        })
+
+        $loginForm.Add_Shown({ $wb.Navigate($authUrl) })
+        [void]$loginForm.ShowDialog()
+
+        if ($ls.Err) {
+            & $logLine "Modern Auth: sign-in error — $($ls.Err): $($ls.ErrDesc)"
             return $null
         }
-        if (-not $code) {
-            & $logLine "Modern Auth: no authorization code received in callback."
+        if (-not $ls.Code) {
+            & $logLine "Modern Auth: sign-in cancelled."
             return $null
         }
 
-        # Exchange the authorization code for an access token
-        $tokBody      = "grant_type=authorization_code" +
+        # Exchange authorization code for access token
+        $tokBody = "grant_type=authorization_code" +
             "&client_id=$clientId" +
-            "&code=$([Uri]::EscapeDataString($code))" +
+            "&code=$([Uri]::EscapeDataString($ls.Code))" +
             "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
             "&code_verifier=$codeVerifier" +
             "&scope=$([Uri]::EscapeDataString($scope))"
@@ -594,10 +589,10 @@ $script:TestScript = {
                 $tok  = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
                 $resp.Close()
                 if ($tok.access_token) {
-                    & $logLine "Modern Auth: access token acquired successfully."
+                    & $logLine "Modern Auth: access token acquired."
                     return "Bearer $($tok.access_token)"
                 }
-                & $logLine "Modern Auth: token response did not contain access_token."
+                & $logLine "Modern Auth: token response missing access_token."
                 return $null
             } catch [System.Net.WebException] {
                 $exT = $_.Exception
@@ -917,24 +912,6 @@ $btnTest.Add_Click({
         return
     }
 
-    # Validate OAuth2 Client ID when Modern Auth is enabled
-    if ($chkModernAuth.Checked -and -not $txtClientId.Text.Trim()) {
-        [System.Windows.Forms.MessageBox]::Show(
-            "An Azure AD Application (client) ID is required for Modern Auth.`n`n" +
-            "How to register a free app (takes ~2 minutes):`n" +
-            "1. Go to portal.azure.com → Azure Active Directory → App registrations`n" +
-            "2. Click 'New registration'`n" +
-            "3. Name: Exchange Tester  |  Account type: Single-tenant`n" +
-            "4. Redirect URI: Public client (mobile/desktop)  →  http://localhost`n" +
-            "5. Click Register — no permissions need to be added`n" +
-            "6. Copy the Application (client) ID and paste it in the field above.",
-            "OAuth2 Client ID required",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        ) | Out-Null
-        $txtClientId.Focus()
-        return
-    }
 
     # Certificate validation callback
     if ($chkIgnoreCert.Checked) {
@@ -972,7 +949,7 @@ $btnTest.Add_Click({
 
     # Create a dedicated runspace so PS script blocks work without issues
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $rs.ApartmentState = [System.Threading.ApartmentState]::STA
     $rs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
     $rs.Open()
     $script:CurrentRS = $rs
