@@ -327,12 +327,18 @@ function ConvertFrom-AutodiscoverXml {
 #  BACKGROUND WORKER
 #==============================================================================
 
+# Capture the main runspace so script blocks can be invoked on the ThreadPool thread
+$script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+
 $bgWorker = New-Object System.ComponentModel.BackgroundWorker
 $bgWorker.WorkerReportsProgress     = $true
 $bgWorker.WorkerSupportsCancellation = $true
 
 $bgWorker.Add_DoWork({
     param($bwSender, $bwArgs)
+
+    # Make PowerShell script block invocations work on this ThreadPool thread
+    [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace = $script:MainRunspace
 
     $a          = $bwArgs.Argument
     $email      = $a.Email
