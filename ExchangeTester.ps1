@@ -69,59 +69,69 @@ $txtPass.TabIndex     = 1
 $form.Controls.Add($txtPass)
 #endregion
 
-#region --- Row 3: Checkboxes ---
+#region --- Rows 3-4: Checkboxes ---
+# Row 3
 $chkModernAuth = New-Object System.Windows.Forms.CheckBox
 $chkModernAuth.Text      = "Try Modern Auth (OAuth2)"
 $chkModernAuth.Location  = New-Object System.Drawing.Point(8, 70)
-$chkModernAuth.Size      = New-Object System.Drawing.Size(185, 20)
+$chkModernAuth.Size      = New-Object System.Drawing.Size(180, 20)
 $chkModernAuth.Checked   = $false
 $chkModernAuth.TabIndex  = 2
 $form.Controls.Add($chkModernAuth)
 
 $chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
 $chkUseCurrentUser.Text     = "Use logged-in user (Windows Auth)"
-$chkUseCurrentUser.Location = New-Object System.Drawing.Point(200, 70)
-$chkUseCurrentUser.Size     = New-Object System.Drawing.Size(240, 20)
+$chkUseCurrentUser.Location = New-Object System.Drawing.Point(195, 70)
+$chkUseCurrentUser.Size     = New-Object System.Drawing.Size(225, 20)
 $chkUseCurrentUser.Checked  = $true
 $chkUseCurrentUser.TabIndex = 3
 $form.Controls.Add($chkUseCurrentUser)
 
+# Row 4
 $chkIgnoreCert = New-Object System.Windows.Forms.CheckBox
 $chkIgnoreCert.Text     = "Ignore certificate errors"
-$chkIgnoreCert.Location = New-Object System.Drawing.Point(420, 70)
-$chkIgnoreCert.Size     = New-Object System.Drawing.Size(195, 20)
+$chkIgnoreCert.Location = New-Object System.Drawing.Point(8, 94)
+$chkIgnoreCert.Size     = New-Object System.Drawing.Size(180, 20)
 $chkIgnoreCert.Checked  = $false
 $chkIgnoreCert.TabIndex = 4
 $form.Controls.Add($chkIgnoreCert)
+
+$chkUseSCP = New-Object System.Windows.Forms.CheckBox
+$chkUseSCP.Text     = "Use SCP (domain-joined)"
+$chkUseSCP.Location = New-Object System.Drawing.Point(195, 94)
+$chkUseSCP.Size     = New-Object System.Drawing.Size(175, 20)
+$chkUseSCP.Checked  = $true
+$chkUseSCP.TabIndex = 5
+$form.Controls.Add($chkUseSCP)
 #endregion
 
 #region --- Buttons (top-right) ---
 $btnTest = New-Object System.Windows.Forms.Button
 $btnTest.Text     = "Test"
-$btnTest.Location = New-Object System.Drawing.Point(620, 64)
+$btnTest.Location = New-Object System.Drawing.Point(620, 75)
 $btnTest.Size     = New-Object System.Drawing.Size(68, 26)
-$btnTest.TabIndex = 5
+$btnTest.TabIndex = 6
 $form.Controls.Add($btnTest)
 $form.AcceptButton = $btnTest
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text     = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(696, 64)
+$btnCancel.Location = New-Object System.Drawing.Point(696, 75)
 $btnCancel.Size     = New-Object System.Drawing.Size(68, 26)
 $btnCancel.Enabled  = $false
-$btnCancel.TabIndex = 6
+$btnCancel.TabIndex = 7
 $form.Controls.Add($btnCancel)
 #endregion
 
 #region --- Separator + Progress bar ---
 $pnlSep = New-Object System.Windows.Forms.Panel
-$pnlSep.Location  = New-Object System.Drawing.Point(0, 96)
+$pnlSep.Location  = New-Object System.Drawing.Point(0, 120)
 $pnlSep.Size      = New-Object System.Drawing.Size(775, 2)
 $pnlSep.BackColor = [System.Drawing.SystemColors]::ControlDark
 $form.Controls.Add($pnlSep)
 
 $prgBar = New-Object System.Windows.Forms.ProgressBar
-$prgBar.Location = New-Object System.Drawing.Point(8, 104)
+$prgBar.Location = New-Object System.Drawing.Point(8, 128)
 $prgBar.Size     = New-Object System.Drawing.Size(757, 14)
 $prgBar.Minimum  = 0
 $prgBar.Maximum  = 100
@@ -131,8 +141,8 @@ $form.Controls.Add($prgBar)
 
 #region --- TabControl ---
 $tabCtrl = New-Object System.Windows.Forms.TabControl
-$tabCtrl.Location = New-Object System.Drawing.Point(8, 124)
-$tabCtrl.Size     = New-Object System.Drawing.Size(757, 462)
+$tabCtrl.Location = New-Object System.Drawing.Point(8, 148)
+$tabCtrl.Size     = New-Object System.Drawing.Size(757, 438)
 $form.Controls.Add($tabCtrl)
 
 # Tab: Results
@@ -443,6 +453,7 @@ $script:TestScript = {
     }
 
     $tryModernAuth = $sync.ModernAuth
+    $useSCP        = $sync.UseSCP
 
     # Device Code Flow → "Bearer <access_token>" string, or $null on failure/cancel
     # Authorization Code Flow with PKCE — opens the default browser, user logs in
@@ -632,8 +643,13 @@ $script:TestScript = {
             } else {
                 & $logLine "  WWW-Authenticate: (not present)"
             }
-            if ($tryModernAuth -and $res.WwwAuth -and $res.WwwAuth -match 'Bearer') {
-                & $logLine "Modern Auth challenge detected. Initiating OAuth2 Authorization Code Flow."
+            $hasBearerChallenge = $res.WwwAuth -and $res.WwwAuth -match 'Bearer'
+            $isO365Endpoint     = $url -match 'outlook\.office365\.com'
+            if ($tryModernAuth -and ($hasBearerChallenge -or $isO365Endpoint)) {
+                if ($isO365Endpoint -and -not $hasBearerChallenge) {
+                    & $logLine "  O365 endpoint detected — attempting Modern Auth proactively (Bearer not advertised)."
+                }
+                & $logLine "Modern Auth: initiating OAuth2 Authorization Code Flow…"
                 $token = & $getToken $res.WwwAuth
                 if ($token) {
                     & $logLine "Retrying AutoDiscover with Bearer token."
@@ -681,7 +697,7 @@ $script:TestScript = {
 
     # --- Step 4: SCP (Active Directory Service Connection Point) ---
     & $setPct 65
-    if (-not $foundXml -and -not $sync.Cancel) {
+    if (-not $foundXml -and -not $sync.Cancel -and $useSCP) {
         & $logLine "Local AutoDiscover for $domain starting."
         try {
             $searcher = New-Object System.DirectoryServices.DirectorySearcher
@@ -885,6 +901,7 @@ $btnTest.Add_Click({
         Password       = $txtPass.Text
         UseWindowsAuth = $chkUseCurrentUser.Checked
         ModernAuth     = $chkModernAuth.Checked
+        UseSCP         = $chkUseSCP.Checked
         Cancel         = $false
         Done           = $false
         Xml            = $null
