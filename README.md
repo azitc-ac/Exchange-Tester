@@ -33,15 +33,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ExchangeTester.ps1
 
 ## What it tests
 
-The tool runs the same AutoDiscover discovery sequence as Outlook, in order:
+When **Use SCP** is checked (default), the tool runs in the same order as Outlook on domain-joined machines:
 
 | Step | Method | URL / Source |
 |------|--------|--------------|
-| 1 | HTTPS POST | `https://outlook.office365.com/autodiscover/autodiscover.xml` |
-| 2 | HTTPS POST | `https://<domain>/autodiscover/autodiscover.xml` |
-| 3 | HTTPS POST | `https://autodiscover.<domain>/autodiscover/autodiscover.xml` |
-| 3a | Redirect follow | If step 2 or 3 returns 301/302 |
-| 4 | AD SCP lookup | Active Directory Service Connection Point (domain-joined machines) |
+| 1 | AD SCP lookup | Active Directory Service Connection Point *(skipped if Use SCP is off)* |
+| 2 | HTTPS POST | `https://outlook.office365.com/autodiscover/autodiscover.xml` |
+| 3 | HTTPS POST | `https://<domain>/autodiscover/autodiscover.xml` |
+| 4 | HTTPS POST | `https://autodiscover.<domain>/autodiscover/autodiscover.xml` |
+| 4a | Redirect follow | If step 3 or 4 returns 301/302 |
 | 5 | HTTP redirect | `http://autodiscover.<domain>/autodiscover/autodiscover.xml` |
 | 6 | DNS SRV | `_autodiscover._tcp.<domain>` |
 
@@ -55,6 +55,22 @@ Each step is logged with HTTP status codes identical to Outlook's protocol log (
 |--------|-----------|
 | **Use logged-in user (Windows Auth)** *(default)* | Uses current Windows credentials via NTLM / Kerberos |
 | Uncheck + enter password | Sends e-mail address + password as Basic / NTLM credentials |
+| **Try Modern Auth (OAuth2)** | Opens a browser window for interactive login (incl. MFA). Requires an Azure AD app — see below. |
+
+---
+
+## Modern Auth (OAuth2) setup
+
+Modern Auth uses Authorization Code Flow with PKCE. Because Microsoft disables its own first-party app IDs in many corporate tenants, you must register your own free Azure AD application (takes ~2 minutes, no admin rights required for single-tenant):
+
+1. Go to **portal.azure.com** → **Azure Active Directory** → **App registrations** → **New registration**
+2. **Name:** Exchange Tester (or anything)
+3. **Supported account types:** *Accounts in this organizational directory only* (single-tenant)
+4. **Redirect URI:** Platform = **Public client / native (mobile & desktop)**, URI = `http://localhost`
+5. Click **Register** — no API permissions need to be added
+6. Copy the **Application (client) ID** and paste it into the **OAuth2 Client ID** field in the tool
+
+The user will be prompted for consent on the first login. No client secret is needed.
 
 ---
 
@@ -74,9 +90,10 @@ Each step is logged with HTTP status codes identical to Outlook's protocol log (
 
 | Option | Description |
 |--------|-------------|
-| Use AutoDiscover | Always enabled (placeholder for future Guessmart support) |
+| Try Modern Auth (OAuth2) | Opens browser for interactive login; requires an Azure AD app client ID (see above) |
 | Use logged-in user | Toggle between Windows Auth and explicit credentials |
 | Ignore certificate errors | Bypasses TLS certificate validation — useful for on-premises Exchange with self-signed certificates |
+| Use SCP (domain-joined) | Runs AD Service Connection Point lookup as step 1 (priority, like Outlook on domain-joined machines) |
 
 ---
 

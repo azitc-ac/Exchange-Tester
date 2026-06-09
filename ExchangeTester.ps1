@@ -135,11 +135,15 @@ $form.Controls.Add($lblClientId)
 $txtClientId = New-Object System.Windows.Forms.TextBox
 $txtClientId.Location  = New-Object System.Drawing.Point(122, 116)
 $txtClientId.Size      = New-Object System.Drawing.Size(490, 22)
-$txtClientId.Text      = 'a0c73c16-a7e3-4564-9a95-2bdf47383716'
+$txtClientId.Text      = ''
 $txtClientId.Enabled   = $false
 $txtClientId.TabIndex  = 8
 $txtClientId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
 $form.Controls.Add($txtClientId)
+
+$toolTip = New-Object System.Windows.Forms.ToolTip
+$toolTip.SetToolTip($txtClientId, "Azure AD Application (client) ID. Register a free app at portal.azure.com — see README for steps.")
+$toolTip.SetToolTip($lblClientId, "Azure AD Application (client) ID. Register a free app at portal.azure.com — see README for steps.")
 #endregion
 
 #region --- Separator + Progress bar ---
@@ -910,6 +914,25 @@ $btnTest.Add_Click({
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null
+        return
+    }
+
+    # Validate OAuth2 Client ID when Modern Auth is enabled
+    if ($chkModernAuth.Checked -and -not $txtClientId.Text.Trim()) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "An Azure AD Application (client) ID is required for Modern Auth.`n`n" +
+            "How to register a free app (takes ~2 minutes):`n" +
+            "1. Go to portal.azure.com → Azure Active Directory → App registrations`n" +
+            "2. Click 'New registration'`n" +
+            "3. Name: Exchange Tester  |  Account type: Single-tenant`n" +
+            "4. Redirect URI: Public client (mobile/desktop)  →  http://localhost`n" +
+            "5. Click Register — no permissions need to be added`n" +
+            "6. Copy the Application (client) ID and paste it in the field above.",
+            "OAuth2 Client ID required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+        $txtClientId.Focus()
         return
     }
 
