@@ -686,14 +686,18 @@ $script:TestScript = {
             # not the default domain partition — must set search root explicitly.
             $rootDSE    = New-Object System.DirectoryServices.DirectoryEntry("LDAP://RootDSE")
             $configNC   = $rootDSE.Properties["configurationNamingContext"].Value
+            & $logLine "  SCP search root: $configNC"
             $searchRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$configNC")
 
             $searcher = New-Object System.DirectoryServices.DirectorySearcher($searchRoot)
-            $searcher.Filter      = "(&(objectClass=serviceConnectionPoint)(keywords=67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68))"
+            # Match on the Exchange AutoDiscover GUID keyword (with or without braces)
+            # OR on serviceBindingInformation containing "autodiscover" as a fallback.
+            $searcher.Filter      = "(&(objectClass=serviceConnectionPoint)(|(serviceBindingInformation=*autodiscover*)(keywords=67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68)(keywords={67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68})))"
             $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
             [void]$searcher.PropertiesToLoad.Add("serviceBindingInformation")
 
             $scpHits = $searcher.FindAll()
+            & $logLine "  SCP records found: $($scpHits.Count)"
             if ($scpHits.Count -eq 0) {
                 & $logLine "Local AutoDiscover for $domain failed (0x8004010F)."
             } else {
