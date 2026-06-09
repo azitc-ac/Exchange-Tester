@@ -529,8 +529,10 @@ $script:TestScript = {
             Set-ItemProperty -Path $feKey -Name $procName -Value 11001 -Type DWord
         } catch {}
 
-        # State bag shared between outer scope and WinForms event handlers
-        $ls = @{ Code = $null; Err = $null; ErrDesc = $null }
+        # Clear any leftover OAuth state from a previous attempt
+        $sync.OAuthCode    = $null
+        $sync.OAuthErr     = $null
+        $sync.OAuthErrDesc = $null
 
         $loginForm = New-Object System.Windows.Forms.Form
         $loginForm.Text          = "Sign in to Microsoft  —  Exchange Tester"
@@ -543,28 +545,40 @@ $script:TestScript = {
         $wb.ScriptErrorsSuppressed = $true
         $loginForm.Controls.Add($wb)
 
-        # Intercept the nativeclient redirect BEFORE the browser loads it
+        # Check AbsolutePath only — NOT the full URL string.
+        # Checking the full URL with -like would false-positive on the initial auth navigation
+        # because the redirect_uri query parameter contains the nativeclient URL as a substring.
+        # Using $sync for data transfer and $s.FindForm() avoids PowerShell closure capture issues.
         $wb.Add_Navigating({
             param($s, $e)
-            $url = $e.Url.ToString()
-            if ($url -like 'https://login.microsoftonline.com/*/oauth2/nativeclient*') {
-                $qs         = [System.Web.HttpUtility]::ParseQueryString(([Uri]$url).Query)
-                $ls.Code    = $qs["code"]
-                $ls.Err     = $qs["error"]
-                $ls.ErrDesc = $qs["error_description"]
-                $e.Cancel   = $true
-                $loginForm.Close()
-            }
+            try {
+                $uri = $e.Url
+                if (-not $uri) { return }
+                if ($uri.Host -eq 'login.microsoftonline.com' -and
+                    $uri.AbsolutePath -like '*/oauth2/nativeclient*') {
+                    $qs = [System.Web.HttpUtility]::ParseQueryString($uri.Query)
+                    $sync.OAuthCode    = $qs["code"]
+                    $sync.OAuthErr     = $qs["error"]
+                    $sync.OAuthErrDesc = $qs["error_description"]
+                    $e.Cancel = $true
+                    $s.FindForm().Close()
+                }
+            } catch {}
         })
 
         $loginForm.Add_Shown({ $wb.Navigate($authUrl) })
         [void]$loginForm.ShowDialog()
+        $loginForm.Dispose()
 
-        if ($ls.Err) {
-            & $logLine "Modern Auth: sign-in error — $($ls.Err): $($ls.ErrDesc)"
+        $code      = $sync.OAuthCode;    $sync.OAuthCode    = $null
+        $cbErr     = $sync.OAuthErr;     $sync.OAuthErr     = $null
+        $cbErrDesc = $sync.OAuthErrDesc; $sync.OAuthErrDesc = $null
+
+        if ($cbErr) {
+            & $logLine "Modern Auth: sign-in error — ${cbErr}: $cbErrDesc"
             return $null
         }
-        if (-not $ls.Code) {
+        if (-not $code) {
             & $logLine "Modern Auth: sign-in cancelled."
             return $null
         }
@@ -572,7 +586,7 @@ $script:TestScript = {
         # Exchange authorization code for access token
         $tokBody = "grant_type=authorization_code" +
             "&client_id=$clientId" +
-            "&code=$([Uri]::EscapeDataString($ls.Code))" +
+            "&code=$([Uri]::EscapeDataString($code))" +
             "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
             "&code_verifier=$codeVerifier" +
             "&scope=$([Uri]::EscapeDataString($scope))"
