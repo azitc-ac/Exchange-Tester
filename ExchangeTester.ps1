@@ -478,147 +478,173 @@ $script:TestScript = {
     $tryModernAuth = $sync.ModernAuth
     $useSCP        = $sync.UseSCP
 
-    # Authorization Code Flow with PKCE — embedded IE WebBrowser popup, no external browser.
-    # Intercepts the http://localhost redirect before the browser attempts the connection.
+    # Device Code Flow — no redirect URI registration needed.
+    # Shows a short code; user signs in via any browser at microsoft.com/devicelogin.
     $getToken = {
         param([string]$wwwAuthHeader)
 
-        Add-Type -AssemblyName System.Web
-
-        # Normalize the authorization_uri from the Bearer challenge to v2.0
         $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
         if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
             $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
         }
-        $tokenUrl    = $authUri -replace '/authorize', '/token'
-        $clientId    = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
-        $redirectUri = 'http://localhost'
-        $scope       = 'https://outlook.office365.com/.default offline_access'
+        $deviceCodeUrl = $authUri -replace '/authorize', '/devicecode'
+        $tokenUrl      = $authUri -replace '/authorize', '/token'
+        $clientId      = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
+        $scope         = 'https://outlook.office365.com/.default offline_access'
 
-        # PKCE: 48 random bytes → base64url code_verifier, SHA-256 → code_challenge
-        $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
-        $buf = New-Object byte[] 48
-        $rng.GetBytes($buf)
-        $codeVerifier  = [Convert]::ToBase64String($buf).TrimEnd('=').Replace('+','-').Replace('/','_')
-        $sha256        = [System.Security.Cryptography.SHA256]::Create()
-        $codeChallenge = [Convert]::ToBase64String(
-            $sha256.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($codeVerifier))
-        ).TrimEnd('=').Replace('+','-').Replace('/','_')
+        & $logLine "Modern Auth: requesting device code…"
 
-        $state   = [Guid]::NewGuid().ToString("N")
-        $authUrl = $authUri +
-            "?client_id=$clientId" +
-            "&response_type=code" +
-            "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
-            "&scope=$([Uri]::EscapeDataString($scope))" +
-            "&code_challenge=$codeChallenge" +
-            "&code_challenge_method=S256" +
-            "&login_hint=$([Uri]::EscapeDataString($email))" +
-            "&state=$state" +
-            "&prompt=select_account"
-
-        & $logLine "Modern Auth: opening sign-in popup…"
-
-        # Force WebBrowser control to use IE11 rendering engine for this process
+        # Step 1 — get device code
+        $dcBytes = [System.Text.Encoding]::UTF8.GetBytes(
+            "client_id=$([Uri]::EscapeDataString($clientId))&scope=$([Uri]::EscapeDataString($scope))")
+        $dcJson = $null
         try {
-            $procName = [System.IO.Path]::GetFileName(
-                [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
-            $feKey = "HKCU:\Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BROWSER_EMULATION"
-            if (-not (Test-Path $feKey)) { New-Item -Path $feKey -Force | Out-Null }
-            Set-ItemProperty -Path $feKey -Name $procName -Value 11001 -Type DWord
-        } catch {}
+            $rq = [System.Net.HttpWebRequest]::Create($deviceCodeUrl)
+            $rq.Method        = "POST"
+            $rq.ContentType   = "application/x-www-form-urlencoded"
+            $rq.ContentLength = $dcBytes.Length
+            $rq.Timeout       = 15000
+            $ss = $rq.GetRequestStream(); $ss.Write($dcBytes, 0, $dcBytes.Length); $ss.Close()
+            $rp = $rq.GetResponse()
+            $dcJson = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+            $rp.Close()
+        } catch [System.Net.WebException] {
+            $exT = $_.Exception
+            if ($exT.Response) {
+                try {
+                    $ej = (New-Object System.IO.StreamReader($exT.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $exT.Response.Close()
+                    & $logLine "Modern Auth: device code request failed — $($ej.error): $($ej.error_description)"
+                } catch { & $logLine "Modern Auth: device code request failed — $($exT.Message)" }
+            } else { & $logLine "Modern Auth: device code request failed — $($exT.Message)" }
+            return $null
+        } catch {
+            & $logLine "Modern Auth: device code request error — $($_.Exception.Message)"
+            return $null
+        }
 
-        # Clear any leftover OAuth state from a previous attempt
-        $sync.OAuthCode    = $null
-        $sync.OAuthErr     = $null
-        $sync.OAuthErrDesc = $null
+        $userCode   = $dcJson.user_code
+        $deviceCode = $dcJson.device_code
+        $verifyUri  = if ($dcJson.verification_uri) { $dcJson.verification_uri } else { $dcJson.verification_url }
+        $pollSec    = [int]$dcJson.interval; if ($pollSec -lt 5) { $pollSec = 5 }
 
-        $loginForm = New-Object System.Windows.Forms.Form
-        $loginForm.Text          = "Sign in to Microsoft  —  Exchange Tester"
-        $loginForm.Size          = New-Object System.Drawing.Size(520, 660)
-        $loginForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-        $loginForm.MinimizeBox   = $false
+        & $logLine "Modern Auth: visit $verifyUri — enter code: $userCode"
 
-        $wb = New-Object System.Windows.Forms.WebBrowser
-        $wb.Dock                   = [System.Windows.Forms.DockStyle]::Fill
-        $wb.ScriptErrorsSuppressed = $true
-        $loginForm.Controls.Add($wb)
+        $sync.DeviceToken  = $null
+        $sync.DeviceError  = $null
+        $sync.DeviceCancel = $false
 
-        # Intercept the redirect to http://localhost BEFORE the browser tries to connect.
-        # Using $sync for data transfer and $s.FindForm() avoids PowerShell closure capture issues.
-        $wb.Add_Navigating({
-            param($s, $e)
+        # Step 2 — show dialog with code while polling
+        $dcForm = New-Object System.Windows.Forms.Form
+        $dcForm.Text            = "Sign in to Microsoft"
+        $dcForm.Size            = New-Object System.Drawing.Size(440, 210)
+        $dcForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+        $dcForm.MinimizeBox     = $false
+        $dcForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+
+        $lbl1 = New-Object System.Windows.Forms.Label
+        $lbl1.Text     = "1.  Open a browser and go to:"
+        $lbl1.Location = New-Object System.Drawing.Point(12, 14)
+        $lbl1.AutoSize = $true
+
+        $lnk = New-Object System.Windows.Forms.LinkLabel
+        $lnk.Text     = $verifyUri
+        $lnk.Location = New-Object System.Drawing.Point(28, 34)
+        $lnk.AutoSize = $true
+        $lnk.Add_LinkClicked({ [System.Diagnostics.Process]::Start($lnk.Text) })
+
+        $lbl2 = New-Object System.Windows.Forms.Label
+        $lbl2.Text     = "2.  Enter this code:"
+        $lbl2.Location = New-Object System.Drawing.Point(12, 62)
+        $lbl2.AutoSize = $true
+
+        $lblCode = New-Object System.Windows.Forms.Label
+        $lblCode.Text      = $userCode
+        $lblCode.Font      = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold)
+        $lblCode.Location  = New-Object System.Drawing.Point(28, 80)
+        $lblCode.AutoSize  = $true
+        $lblCode.ForeColor = [System.Drawing.Color]::DarkBlue
+
+        $btnCopy = New-Object System.Windows.Forms.Button
+        $btnCopy.Text     = "Copy"
+        $btnCopy.Location = New-Object System.Drawing.Point(340, 82)
+        $btnCopy.Size     = New-Object System.Drawing.Size(72, 26)
+        $btnCopy.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($userCode) })
+
+        $lblWait = New-Object System.Windows.Forms.Label
+        $lblWait.Text      = "Waiting for sign-in…"
+        $lblWait.Location  = New-Object System.Drawing.Point(12, 144)
+        $lblWait.AutoSize  = $true
+        $lblWait.ForeColor = [System.Drawing.Color]::Gray
+
+        $btnCancelDC = New-Object System.Windows.Forms.Button
+        $btnCancelDC.Text     = "Cancel"
+        $btnCancelDC.Location = New-Object System.Drawing.Point(340, 140)
+        $btnCancelDC.Size     = New-Object System.Drawing.Size(72, 26)
+        $btnCancelDC.Add_Click({ $sync.DeviceCancel = $true; $dcForm.Close() })
+
+        $dcForm.Controls.AddRange(@($lbl1, $lnk, $lbl2, $lblCode, $btnCopy, $lblWait, $btnCancelDC))
+
+        # Poll token endpoint on a timer; runs on UI thread so keep HTTP timeout short
+        $pollTimer = New-Object System.Windows.Forms.Timer
+        $pollTimer.Interval = $pollSec * 1000
+        $pollTimer.Add_Tick({
+            if ($sync.DeviceToken -or $sync.DeviceError -or $sync.DeviceCancel) { return }
+            $pb = [System.Text.Encoding]::UTF8.GetBytes(
+                "grant_type=urn:ietf:params:oauth:grant-type:device_code" +
+                "&client_id=$([Uri]::EscapeDataString($clientId))" +
+                "&device_code=$([Uri]::EscapeDataString($deviceCode))")
             try {
-                $uri = $e.Url
-                if (-not $uri) { return }
-                if ($uri.Scheme -eq 'http' -and $uri.Host -eq 'localhost') {
-                    $qs = [System.Web.HttpUtility]::ParseQueryString($uri.Query)
-                    $sync.OAuthCode    = $qs["code"]
-                    $sync.OAuthErr     = $qs["error"]
-                    $sync.OAuthErrDesc = $qs["error_description"]
-                    $e.Cancel = $true
-                    $s.FindForm().Close()
+                $rq2 = [System.Net.HttpWebRequest]::Create($tokenUrl)
+                $rq2.Method        = "POST"
+                $rq2.ContentType   = "application/x-www-form-urlencoded"
+                $rq2.ContentLength = $pb.Length
+                $rq2.Timeout       = 4000
+                $ss2 = $rq2.GetRequestStream(); $ss2.Write($pb, 0, $pb.Length); $ss2.Close()
+                try {
+                    $rp2  = $rq2.GetResponse()
+                    $tokJ = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $rp2.Close()
+                    if ($tokJ.access_token) {
+                        $sync.DeviceToken = "Bearer $($tokJ.access_token)"
+                        $dcForm.Close()
+                    }
+                } catch [System.Net.WebException] {
+                    $ex2 = $_.Exception
+                    if ($ex2.Response) {
+                        $ej2 = (New-Object System.IO.StreamReader($ex2.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                        $ex2.Response.Close()
+                        switch ($ej2.error) {
+                            'authorization_pending' {}
+                            'slow_down'             { $pollTimer.Interval += 5000 }
+                            default {
+                                $sync.DeviceError = "$($ej2.error): $($ej2.error_description)"
+                                $dcForm.Close()
+                            }
+                        }
+                    }
                 }
             } catch {}
         })
 
-        $loginForm.Add_Shown({ $wb.Navigate($authUrl) })
-        [void]$loginForm.ShowDialog()
-        $loginForm.Dispose()
+        $dcForm.Add_Shown({ $pollTimer.Start() })
+        $dcForm.Add_FormClosed({ $pollTimer.Stop() })
+        [void]$dcForm.ShowDialog()
+        $pollTimer.Dispose()
+        $dcForm.Dispose()
 
-        $code      = $sync.OAuthCode;    $sync.OAuthCode    = $null
-        $cbErr     = $sync.OAuthErr;     $sync.OAuthErr     = $null
-        $cbErrDesc = $sync.OAuthErrDesc; $sync.OAuthErrDesc = $null
-
-        if ($cbErr) {
-            & $logLine "Modern Auth: sign-in error — ${cbErr}: $cbErrDesc"
-            return $null
-        }
-        if (-not $code) {
+        if ($sync.DeviceCancel -or (-not $sync.DeviceToken -and -not $sync.DeviceError)) {
             & $logLine "Modern Auth: sign-in cancelled."
             return $null
         }
-
-        # Exchange authorization code for access token
-        $tokBody = "grant_type=authorization_code" +
-            "&client_id=$clientId" +
-            "&code=$([Uri]::EscapeDataString($code))" +
-            "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
-            "&code_verifier=$codeVerifier" +
-            "&scope=$([Uri]::EscapeDataString($scope))"
-        $tokBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($tokBody)
-        try {
-            $req = [System.Net.HttpWebRequest]::Create($tokenUrl)
-            $req.Method        = "POST"
-            $req.ContentType   = "application/x-www-form-urlencoded"
-            $req.ContentLength = $tokBodyBytes.Length
-            $req.Timeout       = 30000
-            $s = $req.GetRequestStream(); $s.Write($tokBodyBytes, 0, $tokBodyBytes.Length); $s.Close()
-            try {
-                $resp = $req.GetResponse()
-                $tok  = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
-                $resp.Close()
-                if ($tok.access_token) {
-                    & $logLine "Modern Auth: access token acquired."
-                    return "Bearer $($tok.access_token)"
-                }
-                & $logLine "Modern Auth: token response missing access_token."
-                return $null
-            } catch [System.Net.WebException] {
-                $exT = $_.Exception
-                if ($exT.Response) {
-                    $errJ = (New-Object System.IO.StreamReader($exT.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
-                    $exT.Response.Close()
-                    & $logLine "Modern Auth: token exchange failed — $($errJ.error): $($errJ.error_description)"
-                } else {
-                    & $logLine "Modern Auth: token exchange failed — $($exT.Message)"
-                }
-                return $null
-            }
-        } catch {
-            & $logLine "Modern Auth: token exchange error — $($_.Exception.Message)"
+        if ($sync.DeviceError) {
+            & $logLine "Modern Auth: sign-in error — $($sync.DeviceError)"
+            $sync.DeviceError = $null
             return $null
         }
+        & $logLine "Modern Auth: access token acquired."
+        $tok = $sync.DeviceToken; $sync.DeviceToken = $null
+        return $tok
     }
 
     # Try one AutoDiscover POST URL; returns XML string on 200, $null otherwise

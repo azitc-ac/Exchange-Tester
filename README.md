@@ -61,16 +61,19 @@ Each step is logged with HTTP status codes identical to Outlook's protocol log (
 
 ## Modern Auth (OAuth2) setup
 
-Modern Auth uses Authorization Code Flow with PKCE. Because Microsoft disables its own first-party app IDs in many corporate tenants, you must register your own free Azure AD application (takes ~2 minutes, no admin rights required for single-tenant):
+Modern Auth uses **Device Code Flow** — no redirect URI, no browser popup inside the tool. When you click **Test**, a small dialog appears showing a short code (e.g. `ABCD-EFGH`). Open any browser, go to the URL shown (usually `https://microsoft.com/devicelogin`), enter the code, sign in (MFA supported), and the tool receives the token automatically.
+
+The tool tries a built-in Microsoft app ID by default. If your tenant's admin has disabled that app, register your own free Azure AD application (takes ~2 minutes, no admin rights required for single-tenant):
 
 1. Go to **portal.azure.com** → **Azure Active Directory** → **App registrations** → **New registration**
 2. **Name:** Exchange Tester (or anything)
 3. **Supported account types:** *Accounts in this organizational directory only* (single-tenant)
-4. **Redirect URI:** Platform = **Public client / native (mobile & desktop)**, URI = `http://localhost`
-5. Click **Register** — no API permissions need to be added
-6. Copy the **Application (client) ID** and paste it into the **OAuth2 Client ID** field in the tool
+4. **Redirect URI:** leave blank (not needed for device code flow)
+5. Click **Register**
+6. Go to **Authentication** → enable **"Allow public client flows"** → Save
+7. Copy the **Application (client) ID** and paste it into the **OAuth2 Client ID** field in the tool
 
-The user will be prompted for consent on the first login. No client secret is needed.
+No client secret, no API permissions, and no redirect URI are needed.
 
 ---
 
@@ -90,7 +93,7 @@ The user will be prompted for consent on the first login. No client secret is ne
 
 | Option | Description |
 |--------|-------------|
-| Try Modern Auth (OAuth2) | Opens browser for interactive login; requires an Azure AD app client ID (see above) |
+| Try Modern Auth (OAuth2) | Device Code Flow: shows a short code; sign in at microsoft.com/devicelogin in any browser. Optionally enter your own Azure AD app Client ID (see above). |
 | Use logged-in user | Toggle between Windows Auth and explicit credentials |
 | Ignore certificate errors | Bypasses TLS certificate validation — useful for on-premises Exchange with self-signed certificates |
 | Use SCP (domain-joined) | Runs AD Service Connection Point lookup as step 1 (priority, like Outlook on domain-joined machines) |
