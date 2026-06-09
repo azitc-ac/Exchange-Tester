@@ -677,28 +677,10 @@ $script:TestScript = {
 
     $foundXml = $null
 
-    # --- Step 1: O365 ---
-    & $setPct 10
-    if (-not $sync.Cancel) {
-        $foundXml = & $tryUrl "https://outlook.office365.com/autodiscover/autodiscover.xml"
-    }
-
-    # --- Step 2: https://<domain>/autodiscover/autodiscover.xml ---
-    & $setPct 30
-    if (-not $foundXml -and -not $sync.Cancel) {
-        $foundXml = & $tryUrl "https://$domain/autodiscover/autodiscover.xml"
-    }
-
-    # --- Step 3: https://autodiscover.<domain>/autodiscover/autodiscover.xml ---
-    & $setPct 50
-    if (-not $foundXml -and -not $sync.Cancel) {
-        $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
-    }
-
-    # --- Step 4: SCP (Active Directory Service Connection Point) ---
-    & $setPct 65
-    if (-not $foundXml -and -not $sync.Cancel -and $useSCP) {
-        & $logLine "Local AutoDiscover for $domain starting."
+    # --- Step 1: SCP — runs first when "Use SCP" is checked (domain-joined priority) ---
+    & $setPct 5
+    if (-not $sync.Cancel -and $useSCP) {
+        & $logLine "Local AutoDiscover for $domain starting (SCP)."
         try {
             $searcher = New-Object System.DirectoryServices.DirectorySearcher
             $searcher.Filter = "(&(objectClass=serviceConnectionPoint)(|(serviceBindingInformation=*autodiscover*)(keywords=67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68)))"
@@ -725,8 +707,26 @@ $script:TestScript = {
         }
     }
 
+    # --- Step 2: O365 ---
+    & $setPct 20
+    if (-not $foundXml -and -not $sync.Cancel) {
+        $foundXml = & $tryUrl "https://outlook.office365.com/autodiscover/autodiscover.xml"
+    }
+
+    # --- Step 3: https://<domain>/autodiscover/autodiscover.xml ---
+    & $setPct 40
+    if (-not $foundXml -and -not $sync.Cancel) {
+        $foundXml = & $tryUrl "https://$domain/autodiscover/autodiscover.xml"
+    }
+
+    # --- Step 4: https://autodiscover.<domain>/autodiscover/autodiscover.xml ---
+    & $setPct 58
+    if (-not $foundXml -and -not $sync.Cancel) {
+        $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
+    }
+
     # --- Step 5: HTTP redirect check (well-known URL) ---
-    & $setPct 78
+    & $setPct 74
     if (-not $foundXml -and -not $sync.Cancel) {
         $rdUrl = "http://autodiscover.$domain/autodiscover/autodiscover.xml"
         & $logLine "Redirect check for $rdUrl starting."
@@ -748,7 +748,7 @@ $script:TestScript = {
     }
 
     # --- Step 6: DNS SRV _autodiscover._tcp.<domain> ---
-    & $setPct 90
+    & $setPct 88
     if (-not $foundXml -and -not $sync.Cancel) {
         & $logLine "DNS SRV lookup for $domain starting."
         try {
