@@ -324,57 +324,42 @@ function ConvertFrom-AutodiscoverXml {
 }
 
 #endregion ===================================================================
-#  BACKGROUND WORKER
+#  TEST ENGINE  (PowerShell Runspace + WinForms Timer — avoids ThreadPool runspace issue)
 #==============================================================================
 
-# Capture the main runspace so script blocks can be invoked on the ThreadPool thread
-$script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+# Script-level state for the currently running test
+$script:CurrentPS      = $null
+$script:CurrentRS      = $null
+$script:CurrentSync    = $null
+$script:PollTimer      = $null
 
-$bgWorker = New-Object System.ComponentModel.BackgroundWorker
-$bgWorker.WorkerReportsProgress     = $true
-$bgWorker.WorkerSupportsCancellation = $true
+# The actual test logic runs inside a dedicated PS runspace.
+# $sync is the only bridge between the runspace and the UI thread.
+$script:TestScript = {
+    param($sync)
 
-$bgWorker.Add_DoWork({
-    param($bwSender, $bwArgs)
-
-    # Make PowerShell script block invocations work on this ThreadPool thread
-    [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace = $script:MainRunspace
-
-    $a          = $bwArgs.Argument
-    $email      = $a.Email
-    $password   = $a.Password
-    $useWinAuth = $a.UseWindowsAuth
+    $email      = $sync.Email
+    $password   = $sync.Password
+    $useWinAuth = $sync.UseWindowsAuth
     $domain     = ($email -split '@')[1]
 
-    # Explicit credentials (Basic / NTLM with supplied password)
+    # Credentials
     $netCred = $null
     if (-not $useWinAuth -and $password -ne '') {
         $netCred = New-Object System.Net.NetworkCredential($email, $password)
     }
 
     # AutoDiscover POST body
-    $bodyXml = @"
-<?xml version="1.0" encoding="utf-8"?>
-<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
-  <Request>
-    <EMailAddress>$email</EMailAddress>
-    <AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>
-  </Request>
-</Autodiscover>
-"@
+    $bodyXml = "<?xml version=""1.0"" encoding=""utf-8""?>" +
+        "<Autodiscover xmlns=""http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006"">" +
+        "<Request><EMailAddress>$email</EMailAddress>" +
+        "<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>" +
+        "</Request></Autodiscover>"
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyXml)
 
-    #region --- helpers (script blocks, capture outer scope via PS scope chain) ---
-
-    $logLine = {
-        param([string]$msg)
-        $bwSender.ReportProgress(0, [PSCustomObject]@{ Type = 'Log'; Text = $msg })
-    }
-
-    $setPct = {
-        param([int]$pct)
-        $bwSender.ReportProgress($pct, [PSCustomObject]@{ Type = 'Pct' })
-    }
+    # Helpers — all run inside the dedicated runspace, no closure issues
+    $logLine = { param([string]$msg) $sync.Queue.Enqueue($msg) }
+    $setPct  = { param([int]$pct)   $sync.Pct = $pct }
 
     # HTTP POST → @{Code; Body; Location; Error}
     $doPost = {
@@ -510,25 +495,25 @@ $bgWorker.Add_DoWork({
 
     # --- Step 1: O365 ---
     & $setPct 10
-    if (-not $bwSender.CancellationPending) {
+    if (-not $sync.Cancel) {
         $foundXml = & $tryUrl "https://outlook.office365.com/autodiscover/autodiscover.xml"
     }
 
     # --- Step 2: https://<domain>/autodiscover/autodiscover.xml ---
     & $setPct 30
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    if (-not $foundXml -and -not $sync.Cancel) {
         $foundXml = & $tryUrl "https://$domain/autodiscover/autodiscover.xml"
     }
 
     # --- Step 3: https://autodiscover.<domain>/autodiscover/autodiscover.xml ---
     & $setPct 50
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    if (-not $foundXml -and -not $sync.Cancel) {
         $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
     }
 
     # --- Step 4: SCP (Active Directory Service Connection Point) ---
     & $setPct 65
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    if (-not $foundXml -and -not $sync.Cancel) {
         & $logLine "Local AutoDiscover for $domain starting."
         try {
             $searcher = New-Object System.DirectoryServices.DirectorySearcher
@@ -558,7 +543,7 @@ $bgWorker.Add_DoWork({
 
     # --- Step 5: HTTP redirect check (well-known URL) ---
     & $setPct 78
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    if (-not $foundXml -and -not $sync.Cancel) {
         $rdUrl = "http://autodiscover.$domain/autodiscover/autodiscover.xml"
         & $logLine "Redirect check for $rdUrl starting."
         $res = & $doGet $rdUrl
@@ -580,7 +565,7 @@ $bgWorker.Add_DoWork({
 
     # --- Step 6: DNS SRV _autodiscover._tcp.<domain> ---
     & $setPct 90
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    if (-not $foundXml -and -not $sync.Cancel) {
         & $logLine "DNS SRV lookup for $domain starting."
         try {
             $srvRecs = Resolve-DnsName -Name "_autodiscover._tcp.$domain" -Type SRV -ErrorAction Stop
@@ -606,50 +591,36 @@ $bgWorker.Add_DoWork({
         }
     }
 
-    if ($bwSender.CancellationPending) { $bwArgs.Cancel = $true; return }
+    if ($sync.Cancel) { $sync.Done = $true; return }
 
     & $setPct 100
-    $bwArgs.Result = [PSCustomObject]@{
-        Xml     = $foundXml
-        Success = ($null -ne $foundXml)
-    }
-})
+    $sync.Xml  = $foundXml
+    $sync.Done = $true
+}
 
-$bgWorker.Add_ProgressChanged({
-    param($sender, $e)
-    $state = $e.UserState
-    if ($state.Type -eq 'Log') {
-        $rtbLog.AppendText("$($state.Text)`r`n")
-        $rtbLog.ScrollToCaret()
-    } elseif ($state.Type -eq 'Pct') {
-        $v = $e.ProgressPercentage
-        if ($v -ge 0 -and $v -le 100) { $prgBar.Value = $v }
-    }
-})
+# Called from the poll timer when $sync.Done becomes $true
+function Complete-Test {
+    $script:PollTimer.Stop()
 
-$bgWorker.Add_RunWorkerCompleted({
-    param($sender, $e)
+    # Drain any remaining log lines
+    $msg = $null
+    while ($script:CurrentSync.Queue.TryDequeue([ref]$msg)) {
+        $rtbLog.AppendText("$msg`r`n")
+    }
+
     $btnTest.Enabled   = $true
     $btnCancel.Enabled = $false
 
-    if ($e.Cancelled) {
+    if ($script:CurrentSync.Cancel) {
         $form.Text = "Test E-Mail AutoConfiguration"
         $rtbLog.AppendText("`r`nTest cancelled.`r`n")
-        return
-    }
-    if ($e.Error) {
-        $form.Text = "Test E-Mail AutoConfiguration  —  Error"
-        $rtbLog.AppendText("`r`nUnhandled error: $($e.Error.Message)`r`n")
-        return
-    }
+    } elseif ($script:CurrentSync.Xml) {
+        $xml = $script:CurrentSync.Xml
 
-    $res = $e.Result
-
-    if ($res.Xml) {
-        # --- XML tab: pretty-print ---
+        # XML tab: pretty-print
         try {
             $xd = New-Object System.Xml.XmlDocument
-            $xd.LoadXml($res.Xml)
+            $xd.LoadXml($xml)
             $sb = New-Object System.Text.StringBuilder
             $sw = New-Object System.IO.StringWriter($sb)
             $xw = New-Object System.Xml.XmlTextWriter($sw)
@@ -659,15 +630,14 @@ $bgWorker.Add_RunWorkerCompleted({
             $xw.Flush()
             $rtbXml.Text = $sb.ToString()
         } catch {
-            $rtbXml.Text = $res.Xml
+            $rtbXml.Text = $xml
         }
 
-        # --- Results tab: parsed rows grouped by section ---
-        $rows = ConvertFrom-AutodiscoverXml -RawXml $res.Xml
+        # Results tab: parsed rows grouped by section
+        $rows = ConvertFrom-AutodiscoverXml -RawXml $xml
         $lvwResults.BeginUpdate()
         $lvwResults.Items.Clear()
         $lvwResults.Groups.Clear()
-
         $groupMap = @{}
         foreach ($row in $rows) {
             if (-not $groupMap.ContainsKey($row.Group)) {
@@ -684,19 +654,21 @@ $bgWorker.Add_RunWorkerCompleted({
 
         $form.Text = "Test E-Mail AutoConfiguration  —  OK"
         $rtbLog.AppendText("`r`nAutoDiscover completed successfully.`r`n")
-
-        # Switch to Results if we got data, otherwise XML
-        if ($rows.Count -gt 0) {
-            $tabCtrl.SelectedTab = $tabResults
-        } else {
-            $tabCtrl.SelectedTab = $tabXml
-        }
+        if ($rows.Count -gt 0) { $tabCtrl.SelectedTab = $tabResults }
+        else                    { $tabCtrl.SelectedTab = $tabXml }
     } else {
         $form.Text = "Test E-Mail AutoConfiguration  —  No configuration found"
         $rtbLog.AppendText("`r`nAutoDiscover failed for all tested methods.`r`n")
         $tabCtrl.SelectedTab = $tabLog
     }
-})
+
+    # Clean up runspace
+    try { $script:CurrentPS.Dispose() }   catch {}
+    try { $script:CurrentRS.Close();  $script:CurrentRS.Dispose() } catch {}
+    $script:CurrentPS   = $null
+    $script:CurrentRS   = $null
+    $script:CurrentSync = $null
+}
 
 #endregion ===================================================================
 #  CONTROL INTERACTIONS
@@ -739,21 +711,64 @@ $btnTest.Add_Click({
     $btnCancel.Enabled   = $true
     $tabCtrl.SelectedTab = $tabLog
 
-    $bgWorker.RunWorkerAsync([PSCustomObject]@{
+    # Build the sync hash that bridges UI thread and test runspace
+    $sync = [hashtable]::Synchronized(@{
         Email          = $email
         Password       = $txtPass.Text
         UseWindowsAuth = $chkUseCurrentUser.Checked
+        Cancel         = $false
+        Done           = $false
+        Xml            = $null
+        Pct            = 0
+        Queue          = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     })
+    $script:CurrentSync = $sync
+
+    # Create a dedicated runspace so PS script blocks work without issues
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $rs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+    $rs.Open()
+    $script:CurrentRS = $rs
+
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($script:TestScript).AddArgument($sync)
+    $script:CurrentPS = $ps
+    [void]$ps.BeginInvoke()
+
+    # Poll timer: drain log queue and check for completion (runs on UI thread)
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 100
+    $timer.Add_Tick({
+        $msg = $null
+        while ($script:CurrentSync -and $script:CurrentSync.Queue.TryDequeue([ref]$msg)) {
+            $rtbLog.AppendText("$msg`r`n")
+            $rtbLog.ScrollToCaret()
+        }
+        if ($script:CurrentSync) {
+            $v = $script:CurrentSync.Pct
+            if ($v -ge 0 -and $v -le 100) { $prgBar.Value = $v }
+        }
+        if ($script:CurrentSync -and $script:CurrentSync.Done) {
+            Complete-Test
+        }
+    })
+    $script:PollTimer = $timer
+    $timer.Start()
 })
 
 $btnCancel.Add_Click({
-    $bgWorker.CancelAsync()
+    if ($script:CurrentSync) { $script:CurrentSync.Cancel = $true }
     $btnCancel.Enabled = $false
     $rtbLog.AppendText("Cancelling...`r`n")
 })
 
 $form.Add_FormClosing({
-    if ($bgWorker.IsBusy) { $bgWorker.CancelAsync() }
+    if ($script:CurrentSync) { $script:CurrentSync.Cancel = $true }
+    if ($script:PollTimer)   { $script:PollTimer.Stop() }
+    try { $script:CurrentPS.Dispose() }   catch {}
+    try { $script:CurrentRS.Close();  $script:CurrentRS.Dispose() } catch {}
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 })
 
