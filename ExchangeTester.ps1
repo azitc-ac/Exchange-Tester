@@ -70,13 +70,13 @@ $form.Controls.Add($txtPass)
 #endregion
 
 #region --- Row 3: Checkboxes ---
-$chkWinAuth = New-Object System.Windows.Forms.CheckBox
-$chkWinAuth.Text      = "Use AutoDiscover"
-$chkWinAuth.Location  = New-Object System.Drawing.Point(8, 70)
-$chkWinAuth.Size      = New-Object System.Drawing.Size(155, 20)
-$chkWinAuth.Checked   = $true
-$chkWinAuth.TabIndex  = 2
-$form.Controls.Add($chkWinAuth)
+$chkModernAuth = New-Object System.Windows.Forms.CheckBox
+$chkModernAuth.Text      = "Try Modern Auth (OAuth2)"
+$chkModernAuth.Location  = New-Object System.Drawing.Point(8, 70)
+$chkModernAuth.Size      = New-Object System.Drawing.Size(185, 20)
+$chkModernAuth.Checked   = $false
+$chkModernAuth.TabIndex  = 2
+$form.Controls.Add($chkModernAuth)
 
 $chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
 $chkUseCurrentUser.Text     = "Use logged-in user (Windows Auth)"
@@ -361,9 +361,10 @@ $script:TestScript = {
     $logLine = { param([string]$msg) $sync.Queue.Enqueue($msg) }
     $setPct  = { param([int]$pct)   $sync.Pct = $pct }
 
-    # HTTP POST → @{Code; Body; Location; Error}
+    # HTTP POST → @{Code; Body; Location; WwwAuth; Error}
+    # Pass $authHeader to override credentials with an explicit Authorization value (e.g. Bearer token)
     $doPost = {
-        param([string]$url)
+        param([string]$url, [string]$authHeader = '')
         try {
             $req = [System.Net.HttpWebRequest]::Create($url)
             $req.Method            = "POST"
@@ -372,7 +373,9 @@ $script:TestScript = {
             $req.AllowAutoRedirect = $false
             $req.Timeout           = 30000
             $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
-            if ($useWinAuth) {
+            if ($authHeader -ne '') {
+                $req.Headers["Authorization"] = $authHeader
+            } elseif ($useWinAuth) {
                 $req.UseDefaultCredentials = $true
             } elseif ($netCred) {
                 $req.Credentials = $netCred
@@ -391,19 +394,20 @@ $script:TestScript = {
                     $rdr.Close()
                 }
                 $resp.Close()
-                return @{ Code = $code; Body = $body; Location = $null; Error = $null }
+                return @{ Code = $code; Body = $body; Location = $null; WwwAuth = $null; Error = $null }
             } catch [System.Net.WebException] {
                 $ex = $_.Exception
                 if ($ex.Response) {
-                    $code = [int]$ex.Response.StatusCode
-                    $loc  = $ex.Response.Headers["Location"]
+                    $code    = [int]$ex.Response.StatusCode
+                    $loc     = $ex.Response.Headers["Location"]
+                    $wwwAuth = $ex.Response.Headers["WWW-Authenticate"]
                     $ex.Response.Close()
-                    return @{ Code = $code; Body = $null; Location = $loc; Error = $null }
+                    return @{ Code = $code; Body = $null; Location = $loc; WwwAuth = $wwwAuth; Error = $null }
                 }
-                return @{ Code = -1; Body = $null; Location = $null; Error = $ex.Message }
+                return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $ex.Message }
             }
         } catch {
-            return @{ Code = -1; Body = $null; Location = $null; Error = $_.Exception.Message }
+            return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $_.Exception.Message }
         }
     }
 
@@ -435,6 +439,96 @@ $script:TestScript = {
         } catch {
             return @{ Code = -1; Location = $null; Error = $_.Exception.Message }
         }
+    }
+
+    $tryModernAuth = $sync.ModernAuth
+
+    # Device Code Flow → "Bearer <access_token>" string, or $null on failure/cancel
+    # Uses the Microsoft Office public client ID (no app registration required)
+    $getToken = {
+        param([string]$wwwAuthHeader)
+
+        # Extract authorization_uri from WWW-Authenticate Bearer challenge
+        $authUri = 'https://login.microsoftonline.com/common/oauth2/authorize'
+        if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
+            $authUri = $Matches[1]
+        }
+
+        # Derive v2.0 endpoints from authorization URI
+        $base          = $authUri -replace '/oauth2.*', '/oauth2/v2.0'
+        $deviceCodeUrl = "$base/devicecode"
+        $tokenUrl      = "$base/token"
+
+        $clientId = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'  # Microsoft Office (public)
+        $scope    = 'https://outlook.office365.com/.default'
+
+        # Request device code
+        $dcBody      = "client_id=$clientId&scope=$([Uri]::EscapeDataString($scope))&login_hint=$([Uri]::EscapeDataString($email))"
+        $dcBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($dcBody)
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($deviceCodeUrl)
+            $req.Method        = "POST"
+            $req.ContentType   = "application/x-www-form-urlencoded"
+            $req.ContentLength = $dcBodyBytes.Length
+            $req.Timeout       = 15000
+            $s = $req.GetRequestStream(); $s.Write($dcBodyBytes, 0, $dcBodyBytes.Length); $s.Close()
+            $resp = $req.GetResponse()
+            $dc   = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+            $resp.Close()
+        } catch {
+            & $logLine "Modern Auth: device code request failed — $($_.Exception.Message)"
+            return $null
+        }
+
+        & $logLine ""
+        & $logLine "=== MODERN AUTH ==================================================="
+        & $logLine "  Open:  $($dc.verification_uri)"
+        & $logLine "  Code:  $($dc.user_code)"
+        & $logLine "  (waiting up to $($dc.expires_in) seconds)"
+        & $logLine "==================================================================="
+        & $logLine ""
+
+        # Poll for token
+        $deadline = (Get-Date).AddSeconds($dc.expires_in)
+        $interval = [Math]::Max([int]$dc.interval, 5)
+
+        while ((Get-Date) -lt $deadline -and -not $sync.Cancel) {
+            Start-Sleep -Seconds $interval
+            $pollBody      = "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$($dc.device_code)"
+            $pollBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($pollBody)
+            try {
+                $req2 = [System.Net.HttpWebRequest]::Create($tokenUrl)
+                $req2.Method        = "POST"
+                $req2.ContentType   = "application/x-www-form-urlencoded"
+                $req2.ContentLength = $pollBodyBytes.Length
+                $req2.Timeout       = 15000
+                $s2 = $req2.GetRequestStream(); $s2.Write($pollBodyBytes, 0, $pollBodyBytes.Length); $s2.Close()
+                try {
+                    $resp2 = $req2.GetResponse()
+                    $tok   = (New-Object System.IO.StreamReader($resp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $resp2.Close()
+                    if ($tok.access_token) {
+                        & $logLine "Modern Auth: token acquired."
+                        return "Bearer $($tok.access_token)"
+                    }
+                } catch [System.Net.WebException] {
+                    $exP = $_.Exception
+                    if ($exP.Response) {
+                        $errJson = (New-Object System.IO.StreamReader($exP.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                        $exP.Response.Close()
+                        switch ($errJson.error) {
+                            'authorization_pending' { continue }
+                            'authorization_declined' { & $logLine "Modern Auth: user declined."; return $null }
+                            'expired_token'          { & $logLine "Modern Auth: code expired.";  return $null }
+                            default { & $logLine "Modern Auth: $($errJson.error_description)"; return $null }
+                        }
+                    }
+                }
+            } catch { & $logLine "Modern Auth: poll error — $($_.Exception.Message)"; return $null }
+        }
+
+        & $logLine "Modern Auth: timed out waiting for browser login."
+        return $null
     }
 
     # Try one AutoDiscover POST URL; returns XML string on 200, $null otherwise
@@ -481,6 +575,22 @@ $script:TestScript = {
         }
 
         if ($res.Code -eq 401) {
+            # Check for Modern Auth (Bearer) challenge in WWW-Authenticate header
+            if ($tryModernAuth -and $res.WwwAuth -and $res.WwwAuth -match 'Bearer') {
+                & $logLine "Modern Auth challenge detected (Bearer). Initiating OAuth2 Device Code Flow."
+                $token = & $getToken $res.WwwAuth
+                if ($token) {
+                    & $logLine "Retrying AutoDiscover with Bearer token."
+                    $res2 = & $doPost $url $token
+                    if ($res2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res2.Code)." }
+                    if ($res2.Code -eq 200) {
+                        & $logLine "AutoDiscover via $url succeeded (Modern Auth)."
+                        return $res2.Body
+                    }
+                    & $logLine "AutoDiscover via $url failed after Modern Auth (httpStatus=$($res2.Code))."
+                    return $null
+                }
+            }
             & $logLine "AutoDiscover via $url failed (0x800C820E)."
             return $null
         }
@@ -716,6 +826,7 @@ $btnTest.Add_Click({
         Email          = $email
         Password       = $txtPass.Text
         UseWindowsAuth = $chkUseCurrentUser.Checked
+        ModernAuth     = $chkModernAuth.Checked
         Cancel         = $false
         Done           = $false
         Xml            = $null
