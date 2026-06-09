@@ -123,15 +123,34 @@ $btnCancel.TabIndex = 7
 $form.Controls.Add($btnCancel)
 #endregion
 
+#region --- Row 5: OAuth2 Client ID ---
+$lblClientId = New-Object System.Windows.Forms.Label
+$lblClientId.Text      = "OAuth2 Client ID:"
+$lblClientId.Location  = New-Object System.Drawing.Point(8, 119)
+$lblClientId.Size      = New-Object System.Drawing.Size(112, 20)
+$lblClientId.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$lblClientId.Enabled   = $false
+$form.Controls.Add($lblClientId)
+
+$txtClientId = New-Object System.Windows.Forms.TextBox
+$txtClientId.Location  = New-Object System.Drawing.Point(122, 116)
+$txtClientId.Size      = New-Object System.Drawing.Size(490, 22)
+$txtClientId.Text      = 'a0c73c16-a7e3-4564-9a95-2bdf47383716'
+$txtClientId.Enabled   = $false
+$txtClientId.TabIndex  = 8
+$txtClientId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
+$form.Controls.Add($txtClientId)
+#endregion
+
 #region --- Separator + Progress bar ---
 $pnlSep = New-Object System.Windows.Forms.Panel
-$pnlSep.Location  = New-Object System.Drawing.Point(0, 120)
+$pnlSep.Location  = New-Object System.Drawing.Point(0, 144)
 $pnlSep.Size      = New-Object System.Drawing.Size(775, 2)
 $pnlSep.BackColor = [System.Drawing.SystemColors]::ControlDark
 $form.Controls.Add($pnlSep)
 
 $prgBar = New-Object System.Windows.Forms.ProgressBar
-$prgBar.Location = New-Object System.Drawing.Point(8, 128)
+$prgBar.Location = New-Object System.Drawing.Point(8, 152)
 $prgBar.Size     = New-Object System.Drawing.Size(757, 14)
 $prgBar.Minimum  = 0
 $prgBar.Maximum  = 100
@@ -141,8 +160,8 @@ $form.Controls.Add($prgBar)
 
 #region --- TabControl ---
 $tabCtrl = New-Object System.Windows.Forms.TabControl
-$tabCtrl.Location = New-Object System.Drawing.Point(8, 148)
-$tabCtrl.Size     = New-Object System.Drawing.Size(757, 438)
+$tabCtrl.Location = New-Object System.Drawing.Point(8, 172)
+$tabCtrl.Size     = New-Object System.Drawing.Size(757, 414)
 $form.Controls.Add($tabCtrl)
 
 # Tab: Results
@@ -455,10 +474,9 @@ $script:TestScript = {
     $tryModernAuth = $sync.ModernAuth
     $useSCP        = $sync.UseSCP
 
-    # Device Code Flow → "Bearer <access_token>" string, or $null on failure/cancel
     # Authorization Code Flow with PKCE — opens the default browser, user logs in
     # normally (incl. MFA), AAD redirects to localhost, tool exchanges code for token.
-    # Uses the Microsoft Office public client ID — no app registration required.
+    # Uses the client ID from the form (defaults to Exchange Online PS module app).
     $getToken = {
         param([string]$wwwAuthHeader)
 
@@ -469,7 +487,7 @@ $script:TestScript = {
         }
         $tokenUrl = $authUri -replace '/authorize', '/token'
 
-        $clientId    = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'  # Microsoft Office (public)
+        $clientId    = if ($sync.ClientId) { $sync.ClientId } else { 'a0c73c16-a7e3-4564-9a95-2bdf47383716' }
         $scope       = 'https://outlook.office365.com/.default offline_access'
         $port        = Get-Random -Minimum 49152 -Maximum 65534
         $redirectUri = "http://localhost:$port"
@@ -870,6 +888,12 @@ function Complete-Test {
 #  CONTROL INTERACTIONS
 #==============================================================================
 
+$chkModernAuth.Add_CheckedChanged({
+    $en = $chkModernAuth.Checked
+    $lblClientId.Enabled = $en
+    $txtClientId.Enabled = $en
+})
+
 $chkUseCurrentUser.Add_CheckedChanged({
     $useExplicit       = -not $chkUseCurrentUser.Checked
     $txtPass.Enabled   = $useExplicit
@@ -913,6 +937,7 @@ $btnTest.Add_Click({
         Password       = $txtPass.Text
         UseWindowsAuth = $chkUseCurrentUser.Checked
         ModernAuth     = $chkModernAuth.Checked
+        ClientId       = $txtClientId.Text.Trim()
         UseSCP         = $chkUseSCP.Checked
         Cancel         = $false
         Done           = $false
@@ -973,4 +998,12 @@ $form.Add_FormClosing({
 #==============================================================================
 #  START
 #==============================================================================
+
+# Pre-fill e-mail with the logged-in user's UPN when available
+try {
+    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $upnClaim = $id.Claims | Where-Object { $_.Type -eq 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn' } | Select-Object -First 1
+    if ($upnClaim -and $upnClaim.Value) { $txtEmail.Text = $upnClaim.Value }
+} catch {}
+
 [System.Windows.Forms.Application]::Run($form)
