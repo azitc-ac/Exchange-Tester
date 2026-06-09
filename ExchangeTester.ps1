@@ -80,7 +80,7 @@ $form.Controls.Add($chkModernAuth)
 
 $chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
 $chkUseCurrentUser.Text     = "Use logged-in user (Windows Auth)"
-$chkUseCurrentUser.Location = New-Object System.Drawing.Point(172, 70)
+$chkUseCurrentUser.Location = New-Object System.Drawing.Point(200, 70)
 $chkUseCurrentUser.Size     = New-Object System.Drawing.Size(240, 20)
 $chkUseCurrentUser.Checked  = $true
 $chkUseCurrentUser.TabIndex = 3
@@ -399,8 +399,9 @@ $script:TestScript = {
                 $ex = $_.Exception
                 if ($ex.Response) {
                     $code    = [int]$ex.Response.StatusCode
-                    $loc     = $ex.Response.Headers["Location"]
-                    $wwwAuth = $ex.Response.Headers["WWW-Authenticate"]
+                    $loc          = $ex.Response.Headers["Location"]
+                    $wwwAuthVals  = try { $ex.Response.Headers.GetValues("WWW-Authenticate") } catch { $null }
+                    $wwwAuth      = if ($wwwAuthVals) { $wwwAuthVals -join ' ' } else { $null }
                     $ex.Response.Close()
                     return @{ Code = $code; Body = $null; Location = $loc; WwwAuth = $wwwAuth; Error = $null }
                 }
@@ -626,9 +627,13 @@ $script:TestScript = {
         }
 
         if ($res.Code -eq 401) {
-            # Check for Modern Auth (Bearer) challenge in WWW-Authenticate header
+            if ($res.WwwAuth) {
+                & $logLine "  WWW-Authenticate: $($res.WwwAuth)"
+            } else {
+                & $logLine "  WWW-Authenticate: (not present)"
+            }
             if ($tryModernAuth -and $res.WwwAuth -and $res.WwwAuth -match 'Bearer') {
-                & $logLine "Modern Auth challenge detected (Bearer). Initiating OAuth2 Device Code Flow."
+                & $logLine "Modern Auth challenge detected. Initiating OAuth2 Authorization Code Flow."
                 $token = & $getToken $res.WwwAuth
                 if ($token) {
                     & $logLine "Retrying AutoDiscover with Bearer token."
@@ -641,6 +646,8 @@ $script:TestScript = {
                     & $logLine "AutoDiscover via $url failed after Modern Auth (httpStatus=$($res2.Code))."
                     return $null
                 }
+            } elseif ($tryModernAuth) {
+                & $logLine "  No Bearer challenge — HMA/OAuth2 not offered by this endpoint."
             }
             & $logLine "AutoDiscover via $url failed (0x800C820E)."
             return $null
