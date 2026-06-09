@@ -479,8 +479,7 @@ $script:TestScript = {
     $useSCP        = $sync.UseSCP
 
     # Authorization Code Flow with PKCE — embedded IE WebBrowser popup, no external browser.
-    # Intercepts the nativeclient redirect before it loads to capture the auth code.
-    # nativeclient is always valid as redirect URI for any public client — no app registration needed.
+    # Intercepts the http://localhost redirect before the browser attempts the connection.
     $getToken = {
         param([string]$wwwAuthHeader)
 
@@ -493,7 +492,7 @@ $script:TestScript = {
         }
         $tokenUrl    = $authUri -replace '/authorize', '/token'
         $clientId    = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
-        $redirectUri = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
+        $redirectUri = 'http://localhost'
         $scope       = 'https://outlook.office365.com/.default offline_access'
 
         # PKCE: 48 random bytes → base64url code_verifier, SHA-256 → code_challenge
@@ -545,17 +544,14 @@ $script:TestScript = {
         $wb.ScriptErrorsSuppressed = $true
         $loginForm.Controls.Add($wb)
 
-        # Check AbsolutePath only — NOT the full URL string.
-        # Checking the full URL with -like would false-positive on the initial auth navigation
-        # because the redirect_uri query parameter contains the nativeclient URL as a substring.
+        # Intercept the redirect to http://localhost BEFORE the browser tries to connect.
         # Using $sync for data transfer and $s.FindForm() avoids PowerShell closure capture issues.
         $wb.Add_Navigating({
             param($s, $e)
             try {
                 $uri = $e.Url
                 if (-not $uri) { return }
-                if ($uri.Host -eq 'login.microsoftonline.com' -and
-                    $uri.AbsolutePath -like '*/oauth2/nativeclient*') {
+                if ($uri.Scheme -eq 'http' -and $uri.Host -eq 'localhost') {
                     $qs = [System.Web.HttpUtility]::ParseQueryString($uri.Query)
                     $sync.OAuthCode    = $qs["code"]
                     $sync.OAuthErr     = $qs["error"]
