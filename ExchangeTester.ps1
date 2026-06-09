@@ -444,91 +444,142 @@ $script:TestScript = {
     $tryModernAuth = $sync.ModernAuth
 
     # Device Code Flow → "Bearer <access_token>" string, or $null on failure/cancel
-    # Uses the Microsoft Office public client ID (no app registration required)
+    # Authorization Code Flow with PKCE — opens the default browser, user logs in
+    # normally (incl. MFA), AAD redirects to localhost, tool exchanges code for token.
+    # Uses the Microsoft Office public client ID — no app registration required.
     $getToken = {
         param([string]$wwwAuthHeader)
 
-        # Extract authorization_uri from WWW-Authenticate Bearer challenge
-        $authUri = 'https://login.microsoftonline.com/common/oauth2/authorize'
+        # Normalize the authorization_uri from the Bearer challenge to v2.0
+        $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
         if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
-            $authUri = $Matches[1]
+            $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
         }
+        $tokenUrl = $authUri -replace '/authorize', '/token'
 
-        # Derive v2.0 endpoints from authorization URI
-        $base          = $authUri -replace '/oauth2.*', '/oauth2/v2.0'
-        $deviceCodeUrl = "$base/devicecode"
-        $tokenUrl      = "$base/token"
+        $clientId    = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'  # Microsoft Office (public)
+        $scope       = 'https://outlook.office365.com/.default offline_access'
+        $port        = Get-Random -Minimum 49152 -Maximum 65534
+        $redirectUri = "http://localhost:$port"
 
-        $clientId = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'  # Microsoft Office (public)
-        $scope    = 'https://outlook.office365.com/.default'
+        # PKCE: 48 random bytes → base64url code_verifier, SHA-256 → code_challenge
+        $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+        $buf = New-Object byte[] 48
+        $rng.GetBytes($buf)
+        $codeVerifier  = [Convert]::ToBase64String($buf).TrimEnd('=').Replace('+','-').Replace('/','_')
+        $sha256        = [System.Security.Cryptography.SHA256]::Create()
+        $codeChallenge = [Convert]::ToBase64String(
+            $sha256.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($codeVerifier))
+        ).TrimEnd('=').Replace('+','-').Replace('/','_')
 
-        # Request device code
-        $dcBody      = "client_id=$clientId&scope=$([Uri]::EscapeDataString($scope))&login_hint=$([Uri]::EscapeDataString($email))"
-        $dcBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($dcBody)
+        # Start local HTTP listener for the redirect callback
+        $listener = New-Object System.Net.HttpListener
+        $listener.Prefixes.Add("$redirectUri/")
         try {
-            $req = [System.Net.HttpWebRequest]::Create($deviceCodeUrl)
-            $req.Method        = "POST"
-            $req.ContentType   = "application/x-www-form-urlencoded"
-            $req.ContentLength = $dcBodyBytes.Length
-            $req.Timeout       = 15000
-            $s = $req.GetRequestStream(); $s.Write($dcBodyBytes, 0, $dcBodyBytes.Length); $s.Close()
-            $resp = $req.GetResponse()
-            $dc   = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
-            $resp.Close()
+            $listener.Start()
         } catch {
-            & $logLine "Modern Auth: device code request failed — $($_.Exception.Message)"
+            & $logLine "Modern Auth: could not start local listener on port $port — $($_.Exception.Message)"
             return $null
         }
 
-        & $logLine ""
-        & $logLine "=== MODERN AUTH ==================================================="
-        & $logLine "  Open:  $($dc.verification_uri)"
-        & $logLine "  Code:  $($dc.user_code)"
-        & $logLine "  (waiting up to $($dc.expires_in) seconds)"
-        & $logLine "==================================================================="
-        & $logLine ""
+        # Build the full authorization URL and open the browser
+        $state   = [Guid]::NewGuid().ToString("N")
+        $authUrl = $authUri +
+            "?client_id=$clientId" +
+            "&response_type=code" +
+            "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
+            "&scope=$([Uri]::EscapeDataString($scope))" +
+            "&code_challenge=$codeChallenge" +
+            "&code_challenge_method=S256" +
+            "&login_hint=$([Uri]::EscapeDataString($email))" +
+            "&state=$state" +
+            "&prompt=select_account"
 
-        # Poll for token
-        $deadline = (Get-Date).AddSeconds($dc.expires_in)
-        $interval = [Math]::Max([int]$dc.interval, 5)
+        & $logLine "Modern Auth: opening browser for interactive login (port $port)…"
+        Start-Process $authUrl
 
+        # Wait for the redirect callback — check cancel every 500 ms
+        $asyncResult = $listener.BeginGetContext($null, $null)
+        $deadline    = (Get-Date).AddMinutes(5)
+        $got         = $false
         while ((Get-Date) -lt $deadline -and -not $sync.Cancel) {
-            Start-Sleep -Seconds $interval
-            $pollBody      = "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$clientId&device_code=$($dc.device_code)"
-            $pollBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($pollBody)
-            try {
-                $req2 = [System.Net.HttpWebRequest]::Create($tokenUrl)
-                $req2.Method        = "POST"
-                $req2.ContentType   = "application/x-www-form-urlencoded"
-                $req2.ContentLength = $pollBodyBytes.Length
-                $req2.Timeout       = 15000
-                $s2 = $req2.GetRequestStream(); $s2.Write($pollBodyBytes, 0, $pollBodyBytes.Length); $s2.Close()
-                try {
-                    $resp2 = $req2.GetResponse()
-                    $tok   = (New-Object System.IO.StreamReader($resp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
-                    $resp2.Close()
-                    if ($tok.access_token) {
-                        & $logLine "Modern Auth: token acquired."
-                        return "Bearer $($tok.access_token)"
-                    }
-                } catch [System.Net.WebException] {
-                    $exP = $_.Exception
-                    if ($exP.Response) {
-                        $errJson = (New-Object System.IO.StreamReader($exP.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
-                        $exP.Response.Close()
-                        switch ($errJson.error) {
-                            'authorization_pending' { continue }
-                            'authorization_declined' { & $logLine "Modern Auth: user declined."; return $null }
-                            'expired_token'          { & $logLine "Modern Auth: code expired.";  return $null }
-                            default { & $logLine "Modern Auth: $($errJson.error_description)"; return $null }
-                        }
-                    }
-                }
-            } catch { & $logLine "Modern Auth: poll error — $($_.Exception.Message)"; return $null }
+            if ($asyncResult.AsyncWaitHandle.WaitOne(500)) { $got = $true; break }
         }
 
-        & $logLine "Modern Auth: timed out waiting for browser login."
-        return $null
+        if (-not $got) {
+            try { $listener.Stop() } catch {}
+            & $logLine "Modern Auth: browser login timed out or was cancelled."
+            return $null
+        }
+
+        # Receive the redirect and send a close-window page back to the browser
+        $code = $null; $cbErr = $null; $cbErrDesc = $null
+        try {
+            $ctx       = $listener.EndGetContext($asyncResult)
+            $code      = $ctx.Request.QueryString["code"]
+            $cbErr     = $ctx.Request.QueryString["error"]
+            $cbErrDesc = $ctx.Request.QueryString["error_description"]
+            $html      = if ($cbErr) {
+                "<html><body><h2>Authentication failed: $cbErr</h2><p>$cbErrDesc</p><p>You may close this window.</p></body></html>"
+            } else {
+                "<html><body><h2>Authentication complete.</h2><p>You may close this window and return to Exchange Tester.</p></body></html>"
+            }
+            $htmlBytes = [System.Text.Encoding]::UTF8.GetBytes($html)
+            $ctx.Response.ContentLength64 = $htmlBytes.Length
+            $ctx.Response.OutputStream.Write($htmlBytes, 0, $htmlBytes.Length)
+            $ctx.Response.Close()
+        } catch {}
+        try { $listener.Stop() } catch {}
+
+        if ($cbErr) {
+            & $logLine "Modern Auth: authorization error — ${cbErr}: $cbErrDesc"
+            return $null
+        }
+        if (-not $code) {
+            & $logLine "Modern Auth: no authorization code received in callback."
+            return $null
+        }
+
+        # Exchange the authorization code for an access token
+        $tokBody      = "grant_type=authorization_code" +
+            "&client_id=$clientId" +
+            "&code=$([Uri]::EscapeDataString($code))" +
+            "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
+            "&code_verifier=$codeVerifier" +
+            "&scope=$([Uri]::EscapeDataString($scope))"
+        $tokBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($tokBody)
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($tokenUrl)
+            $req.Method        = "POST"
+            $req.ContentType   = "application/x-www-form-urlencoded"
+            $req.ContentLength = $tokBodyBytes.Length
+            $req.Timeout       = 30000
+            $s = $req.GetRequestStream(); $s.Write($tokBodyBytes, 0, $tokBodyBytes.Length); $s.Close()
+            try {
+                $resp = $req.GetResponse()
+                $tok  = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                $resp.Close()
+                if ($tok.access_token) {
+                    & $logLine "Modern Auth: access token acquired successfully."
+                    return "Bearer $($tok.access_token)"
+                }
+                & $logLine "Modern Auth: token response did not contain access_token."
+                return $null
+            } catch [System.Net.WebException] {
+                $exT = $_.Exception
+                if ($exT.Response) {
+                    $errJ = (New-Object System.IO.StreamReader($exT.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $exT.Response.Close()
+                    & $logLine "Modern Auth: token exchange failed — $($errJ.error): $($errJ.error_description)"
+                } else {
+                    & $logLine "Modern Auth: token exchange failed — $($exT.Message)"
+                }
+                return $null
+            }
+        } catch {
+            & $logLine "Modern Auth: token exchange error — $($_.Exception.Message)"
+            return $null
+        }
     }
 
     # Try one AutoDiscover POST URL; returns XML string on 200, $null otherwise
