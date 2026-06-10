@@ -69,92 +69,145 @@ $txtPass.TabIndex     = 1
 $form.Controls.Add($txtPass)
 #endregion
 
-#region --- Rows 3-4: Checkboxes ---
-# Row 3
-$chkModernAuth = New-Object System.Windows.Forms.CheckBox
-$chkModernAuth.Text      = "Try Modern Auth (OAuth2)"
-$chkModernAuth.Location  = New-Object System.Drawing.Point(8, 70)
-$chkModernAuth.Size      = New-Object System.Drawing.Size(180, 20)
-$chkModernAuth.Checked   = $false
-$chkModernAuth.TabIndex  = 2
-$form.Controls.Add($chkModernAuth)
+#region --- Auth mode (top-level radio buttons) ---
+$radModernAuth = New-Object System.Windows.Forms.RadioButton
+$radModernAuth.Text     = "Modern Auth (OAuth2)"
+$radModernAuth.Location = New-Object System.Drawing.Point(8, 65)
+$radModernAuth.Size     = New-Object System.Drawing.Size(185, 20)
+$radModernAuth.Checked  = $true
+$radModernAuth.TabIndex = 2
+$form.Controls.Add($radModernAuth)
 
-$chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
-$chkUseCurrentUser.Text     = "Use logged-in user (Windows Auth)"
-$chkUseCurrentUser.Location = New-Object System.Drawing.Point(195, 70)
-$chkUseCurrentUser.Size     = New-Object System.Drawing.Size(225, 20)
-$chkUseCurrentUser.Checked  = $true
-$chkUseCurrentUser.TabIndex = 3
-$form.Controls.Add($chkUseCurrentUser)
-
-# Row 4
-$chkIgnoreCert = New-Object System.Windows.Forms.CheckBox
-$chkIgnoreCert.Text     = "Ignore certificate errors"
-$chkIgnoreCert.Location = New-Object System.Drawing.Point(8, 94)
-$chkIgnoreCert.Size     = New-Object System.Drawing.Size(180, 20)
-$chkIgnoreCert.Checked  = $false
-$chkIgnoreCert.TabIndex = 4
-$form.Controls.Add($chkIgnoreCert)
-
-$chkUseSCP = New-Object System.Windows.Forms.CheckBox
-$chkUseSCP.Text     = "Use SCP (domain-joined)"
-$chkUseSCP.Location = New-Object System.Drawing.Point(195, 94)
-$chkUseSCP.Size     = New-Object System.Drawing.Size(175, 20)
-$chkUseSCP.Checked  = $true
-$chkUseSCP.TabIndex = 5
-$form.Controls.Add($chkUseSCP)
+$radWIA = New-Object System.Windows.Forms.RadioButton
+$radWIA.Text     = "Windows Integrated Auth"
+$radWIA.Location = New-Object System.Drawing.Point(390, 65)
+$radWIA.Size     = New-Object System.Drawing.Size(205, 20)
+$radWIA.Checked  = $false
+$radWIA.TabIndex = 3
+$form.Controls.Add($radWIA)
 #endregion
 
 #region --- Buttons (top-right) ---
 $btnTest = New-Object System.Windows.Forms.Button
 $btnTest.Text     = "Test"
-$btnTest.Location = New-Object System.Drawing.Point(620, 75)
+$btnTest.Location = New-Object System.Drawing.Point(620, 62)
 $btnTest.Size     = New-Object System.Drawing.Size(68, 26)
-$btnTest.TabIndex = 6
+$btnTest.TabIndex = 9
 $form.Controls.Add($btnTest)
 $form.AcceptButton = $btnTest
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text     = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(696, 75)
+$btnCancel.Location = New-Object System.Drawing.Point(696, 62)
 $btnCancel.Size     = New-Object System.Drawing.Size(68, 26)
 $btnCancel.Enabled  = $false
-$btnCancel.TabIndex = 7
+$btnCancel.TabIndex = 10
 $form.Controls.Add($btnCancel)
 #endregion
 
-#region --- Row 5: OAuth2 Client ID ---
+#region --- Modern Auth sub-options (Panel keeps radDCF/radACF exclusive with each other only) ---
+$pnlModernSub = New-Object System.Windows.Forms.Panel
+$pnlModernSub.Location = New-Object System.Drawing.Point(22, 89)
+$pnlModernSub.Size     = New-Object System.Drawing.Size(358, 42)
+$form.Controls.Add($pnlModernSub)
+
+$radDCF = New-Object System.Windows.Forms.RadioButton
+$radDCF.Text     = "Public Office app and Device Code Flow"
+$radDCF.Location = New-Object System.Drawing.Point(2, 1)
+$radDCF.Size     = New-Object System.Drawing.Size(354, 18)
+$radDCF.Checked  = $true
+$radDCF.TabIndex = 0
+$pnlModernSub.Controls.Add($radDCF)
+
+$radACF = New-Object System.Windows.Forms.RadioButton
+$radACF.Text     = "Own 'Exchange Tester' app and Auth Code Flow"
+$radACF.Location = New-Object System.Drawing.Point(2, 22)
+$radACF.Size     = New-Object System.Drawing.Size(354, 18)
+$radACF.Checked  = $false
+$radACF.TabIndex = 1
+$pnlModernSub.Controls.Add($radACF)
+#endregion
+
+#region --- WIA sub-option ---
+$chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
+$chkUseCurrentUser.Text     = "Use logged-in user"
+$chkUseCurrentUser.Location = New-Object System.Drawing.Point(408, 91)
+$chkUseCurrentUser.Size     = New-Object System.Drawing.Size(175, 20)
+$chkUseCurrentUser.Checked  = $true
+$chkUseCurrentUser.Enabled  = $false
+$chkUseCurrentUser.TabIndex = 4
+$form.Controls.Add($chkUseCurrentUser)
+#endregion
+
+#region --- Standalone options ---
+$chkIgnoreCert = New-Object System.Windows.Forms.CheckBox
+$chkIgnoreCert.Text     = "Ignore certificate errors"
+$chkIgnoreCert.Location = New-Object System.Drawing.Point(8, 133)
+$chkIgnoreCert.Size     = New-Object System.Drawing.Size(200, 20)
+$chkIgnoreCert.Checked  = $false
+$chkIgnoreCert.TabIndex = 5
+$form.Controls.Add($chkIgnoreCert)
+
+$chkUseSCP = New-Object System.Windows.Forms.CheckBox
+$chkUseSCP.Text     = "Use SCP (domain-joined)"
+$chkUseSCP.Location = New-Object System.Drawing.Point(390, 133)
+$chkUseSCP.Size     = New-Object System.Drawing.Size(200, 20)
+$chkUseSCP.Checked  = $false
+$chkUseSCP.TabIndex = 6
+$form.Controls.Add($chkUseSCP)
+#endregion
+
+#region --- ACF fields: Client ID + Tenant ID (shown only when ACF selected) ---
 $lblClientId = New-Object System.Windows.Forms.Label
-$lblClientId.Text      = "OAuth2 Client ID:"
-$lblClientId.Location  = New-Object System.Drawing.Point(8, 119)
-$lblClientId.Size      = New-Object System.Drawing.Size(112, 20)
+$lblClientId.Text      = "Client ID:"
+$lblClientId.Location  = New-Object System.Drawing.Point(22, 135)
+$lblClientId.Size      = New-Object System.Drawing.Size(100, 20)
 $lblClientId.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$lblClientId.Enabled   = $false
+$lblClientId.Visible   = $false
 $form.Controls.Add($lblClientId)
 
 $txtClientId = New-Object System.Windows.Forms.TextBox
-$txtClientId.Location  = New-Object System.Drawing.Point(122, 116)
-$txtClientId.Size      = New-Object System.Drawing.Size(490, 22)
-$txtClientId.Text      = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'
-$txtClientId.Enabled   = $false
-$txtClientId.TabIndex  = 8
+$txtClientId.Location  = New-Object System.Drawing.Point(126, 133)
+$txtClientId.Size      = New-Object System.Drawing.Size(460, 22)
+$txtClientId.Text      = ''
+$txtClientId.Visible   = $false
+$txtClientId.TabIndex  = 7
 $txtClientId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
 $form.Controls.Add($txtClientId)
 
+$lblTenantId = New-Object System.Windows.Forms.Label
+$lblTenantId.Text      = "Tenant ID:"
+$lblTenantId.Location  = New-Object System.Drawing.Point(22, 159)
+$lblTenantId.Size      = New-Object System.Drawing.Size(100, 20)
+$lblTenantId.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$lblTenantId.Visible   = $false
+$form.Controls.Add($lblTenantId)
+
+$txtTenantId = New-Object System.Windows.Forms.TextBox
+$txtTenantId.Location  = New-Object System.Drawing.Point(126, 157)
+$txtTenantId.Size      = New-Object System.Drawing.Size(460, 22)
+$txtTenantId.Text      = ''
+$txtTenantId.Visible   = $false
+$txtTenantId.TabIndex  = 8
+$txtTenantId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
+$form.Controls.Add($txtTenantId)
+
 $toolTip = New-Object System.Windows.Forms.ToolTip
-$toolTip.SetToolTip($txtClientId, "Azure AD client ID used for the OAuth2 login popup. Default = Microsoft Office public client. Change only if your tenant has blocked it.")
-$toolTip.SetToolTip($lblClientId, "Azure AD client ID used for the OAuth2 login popup. Default = Microsoft Office public client. Change only if your tenant has blocked it.")
+$toolTip.SetToolTip($lblClientId, "Application (client) ID of your 'Exchange Tester' app registration in Azure AD.")
+$toolTip.SetToolTip($txtClientId, "Application (client) ID of your 'Exchange Tester' app registration in Azure AD.")
+$toolTip.SetToolTip($lblTenantId, "Directory (tenant) ID — GUID or domain, e.g. contoso.onmicrosoft.com.")
+$toolTip.SetToolTip($txtTenantId, "Directory (tenant) ID — GUID or domain, e.g. contoso.onmicrosoft.com.")
 #endregion
 
-#region --- Separator + Progress bar ---
+#region --- Separator + Progress bar (y adjusted dynamically by Update-Layout) ---
 $pnlSep = New-Object System.Windows.Forms.Panel
-$pnlSep.Location  = New-Object System.Drawing.Point(0, 144)
+$pnlSep.Location  = New-Object System.Drawing.Point(0, 156)
 $pnlSep.Size      = New-Object System.Drawing.Size(775, 2)
 $pnlSep.BackColor = [System.Drawing.SystemColors]::ControlDark
 $form.Controls.Add($pnlSep)
 
 $prgBar = New-Object System.Windows.Forms.ProgressBar
-$prgBar.Location = New-Object System.Drawing.Point(8, 152)
+$prgBar.Location = New-Object System.Drawing.Point(8, 164)
 $prgBar.Size     = New-Object System.Drawing.Size(757, 14)
 $prgBar.Minimum  = 0
 $prgBar.Maximum  = 100
@@ -164,8 +217,8 @@ $form.Controls.Add($prgBar)
 
 #region --- TabControl ---
 $tabCtrl = New-Object System.Windows.Forms.TabControl
-$tabCtrl.Location = New-Object System.Drawing.Point(8, 172)
-$tabCtrl.Size     = New-Object System.Drawing.Size(757, 414)
+$tabCtrl.Location = New-Object System.Drawing.Point(8, 183)
+$tabCtrl.Size     = New-Object System.Drawing.Size(757, 403)
 $form.Controls.Add($tabCtrl)
 
 # Tab: Results
@@ -881,6 +934,8 @@ function Complete-Test {
         } catch {
             $rtbXml.Text = $xml
         }
+        $rtbXml.SelectionStart = 0
+        $rtbXml.ScrollToCaret()
 
         # Results tab: parsed rows grouped by section
         $rows = ConvertFrom-AutodiscoverXml -RawXml $xml
@@ -923,17 +978,45 @@ function Complete-Test {
 #  CONTROL INTERACTIONS
 #==============================================================================
 
-$chkModernAuth.Add_CheckedChanged({
-    $en = $chkModernAuth.Checked
-    $lblClientId.Enabled = $en
-    $txtClientId.Enabled = $en
-})
+# Adjusts visible/enabled state of all sub-controls based on current auth selection
+function Update-AuthMode {
+    $isModern = $radModernAuth.Checked
+    $pnlModernSub.Enabled      = $isModern
+    $chkUseCurrentUser.Enabled = -not $isModern
+    $useExplicit = (-not $isModern) -and (-not $chkUseCurrentUser.Checked)
+    $lblPass.Enabled = $useExplicit
+    $txtPass.Enabled = $useExplicit
+    if (-not $useExplicit) { $txtPass.Clear() }
+    Update-Layout
+}
+
+# Repositions standalone options, separator, progress bar, and tab control
+# based on whether ACF rows are visible
+function Update-Layout {
+    $showACF = $radACF.Checked -and $radModernAuth.Checked
+    $lblClientId.Visible = $showACF
+    $txtClientId.Visible = $showACF
+    $lblTenantId.Visible = $showACF
+    $txtTenantId.Visible = $showACF
+    $y = if ($showACF) { 179 } else { 133 }
+    $chkIgnoreCert.Top = $y
+    $chkUseSCP.Top     = $y
+    $pnlSep.Top        = $y + 23
+    $prgBar.Top        = $y + 31
+    $tabCtrl.Top       = $y + 50
+    $tabCtrl.Height    = $form.ClientSize.Height - ($y + 50) - 9
+}
+
+$radModernAuth.Add_CheckedChanged({ if ($radModernAuth.Checked) { Update-AuthMode } })
+$radWIA.Add_CheckedChanged({        if ($radWIA.Checked)        { Update-AuthMode } })
+$radDCF.Add_CheckedChanged({        if ($radDCF.Checked)        { Update-Layout  } })
+$radACF.Add_CheckedChanged({        if ($radACF.Checked)        { Update-Layout  } })
 
 $chkUseCurrentUser.Add_CheckedChanged({
-    $useExplicit       = -not $chkUseCurrentUser.Checked
-    $txtPass.Enabled   = $useExplicit
-    $lblPass.Enabled   = $useExplicit
-    if ($chkUseCurrentUser.Checked) { $txtPass.Clear() }
+    $useExplicit     = -not $chkUseCurrentUser.Checked
+    $lblPass.Enabled = $useExplicit
+    $txtPass.Enabled = $useExplicit
+    if (-not $useExplicit) { $txtPass.Clear() }
 })
 
 $btnTest.Add_Click({
@@ -944,6 +1027,16 @@ $btnTest.Add_Click({
             "Input Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    if ($radModernAuth.Checked -and $radACF.Checked) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Authorization Code Flow is not yet implemented.`nPlease use 'Public Office app and Device Code Flow' instead.",
+            "Not Implemented",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
         ) | Out-Null
         return
     }
@@ -971,9 +1064,11 @@ $btnTest.Add_Click({
     $sync = [hashtable]::Synchronized(@{
         Email          = $email
         Password       = $txtPass.Text
-        UseWindowsAuth = $chkUseCurrentUser.Checked
-        ModernAuth     = $chkModernAuth.Checked
+        UseWindowsAuth = $radWIA.Checked -and $chkUseCurrentUser.Checked
+        ModernAuth     = $radModernAuth.Checked
+        UseDeviceCode  = $radDCF.Checked
         ClientId       = $txtClientId.Text.Trim()
+        TenantId       = $txtTenantId.Text.Trim()
         UseSCP         = $chkUseSCP.Checked
         Cancel         = $false
         Done           = $false
@@ -1035,11 +1130,57 @@ $form.Add_FormClosing({
 #  START
 #==============================================================================
 
-# Pre-fill e-mail with the logged-in user's UPN when available
+# Detect domain-joined status and set SCP checkbox accordingly
+$chkUseSCP.Checked = $false
 try {
-    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $upnClaim = $id.Claims | Where-Object { $_.Type -eq 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn' } | Select-Object -First 1
-    if ($upnClaim -and $upnClaim.Value) { $txtEmail.Text = $upnClaim.Value }
+    [void][System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain()
+    $chkUseSCP.Checked = $true
 } catch {}
+
+# Pre-fill e-mail with the logged-in user's UPN (multiple fallback methods)
+$upn = ''
+
+# Method 1: WindowsIdentity UPN claim (works on domain-joined with Kerberos)
+if (-not $upn) {
+    try {
+        $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $claim = $id.Claims | Where-Object {
+            $_.Type -eq 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn'
+        } | Select-Object -First 1
+        if ($claim -and $claim.Value) { $upn = $claim.Value }
+    } catch {}
+}
+
+# Method 2: USERPRINCIPALNAME environment variable (set by some SSO/MDM solutions)
+if (-not $upn) {
+    try {
+        if ($env:USERPRINCIPALNAME -and $env:USERPRINCIPALNAME -match '@') {
+            $upn = $env:USERPRINCIPALNAME
+        }
+    } catch {}
+}
+
+# Method 3: ADSI lookup in Active Directory (domain-joined machines)
+if (-not $upn) {
+    try {
+        $searcher = [adsisearcher]"samaccountname=$env:USERNAME"
+        [void]$searcher.PropertiesToLoad.Add("userprincipalname")
+        $result = $searcher.FindOne()
+        if ($result) {
+            $val = $result.Properties['userprincipalname']
+            if ($val -and $val.Count -gt 0 -and $val[0] -match '@') { $upn = $val[0] }
+        }
+    } catch {}
+}
+
+# Method 4: whoami /upn (works on domain-joined, may be slow on non-domain machines)
+if (-not $upn) {
+    try {
+        $w = & whoami.exe /upn 2>$null
+        if ($w -and $w.Trim() -match '@') { $upn = $w.Trim() }
+    } catch {}
+}
+
+if ($upn) { $txtEmail.Text = $upn }
 
 [System.Windows.Forms.Application]::Run($form)
