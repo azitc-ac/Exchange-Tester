@@ -501,6 +501,8 @@ $script:CurrentRS      = $null
 $script:CurrentSync    = $null
 $script:PollTimer      = $null
 $script:LastXml        = $null
+$script:LastToken      = $null
+$script:LastTokenExpiry = $null
 
 # The actual test logic runs inside a dedicated PS runspace.
 # $sync is the only bridge between the runspace and the UI thread.
@@ -783,6 +785,8 @@ $script:TestScript = {
             }
             & $logLine "Modern Auth: access token acquired."
             $tok = $sync.DeviceToken; $sync.DeviceToken = $null
+            $sync.LastToken       = $tok
+            $sync.LastTokenExpiry = (Get-Date).AddMinutes(55)
             return $tok
 
         } else {
@@ -971,6 +975,8 @@ $script:TestScript = {
                 return $null
             }
             & $logLine "Modern Auth: access token acquired."
+            $sync.LastToken       = "Bearer $accessTok"
+            $sync.LastTokenExpiry = (Get-Date).AddMinutes(55)
             return "Bearer $accessTok"
         }
     }
@@ -1178,6 +1184,12 @@ $script:TestScript = {
 # Called from the poll timer when $sync.Done becomes $true
 function Complete-Test {
     $script:PollTimer.Stop()
+
+    # Propagate cached auth token so Additional Tests can reuse it without re-auth
+    if ($script:CurrentSync.LastToken) {
+        $script:LastToken       = $script:CurrentSync.LastToken
+        $script:LastTokenExpiry = $script:CurrentSync.LastTokenExpiry
+    }
 
     # Drain any remaining log lines
     $msg = $null
@@ -1739,11 +1751,13 @@ $btnTest.Add_Click({
         ClientId       = $txtClientId.Text.Trim()
         TenantId       = $txtTenantId.Text.Trim()
         UseSCP         = $chkUseSCP.Checked
-        Cancel         = $false
-        Done           = $false
-        Xml            = $null
-        Pct            = 0
-        Queue          = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        Cancel          = $false
+        Done            = $false
+        Xml             = $null
+        Pct             = 0
+        LastToken       = $null
+        LastTokenExpiry = $null
+        Queue           = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     })
     $script:CurrentSync = $sync
 
@@ -1801,6 +1815,239 @@ $btnAddTests.Add_Click({
     }
 
     $ignoreCert = $chkIgnoreCert.Checked
+
+    # ── Determine auth for URL probing ────────────────────────────────────────
+    $authHeader = $null   # "Bearer <token>" for Modern Auth
+    $useWinAuth = $false  # UseDefaultCredentials (current Windows user)
+    $netCred    = $null   # explicit NetworkCredential
+
+    if ($radModernAuth.Checked) {
+        $maScope = 'https://outlook.office365.com/EWS.AccessAsUser.All offline_access'
+
+        # Reuse cached token from the most recent successful test if still valid
+        if ($script:LastToken -and $script:LastTokenExpiry -and (Get-Date) -lt $script:LastTokenExpiry) {
+            $authHeader = $script:LastToken
+        } else {
+            # Token absent or expired — re-acquire
+            if ($radDCF.Checked) {
+                # ── Device Code Flow ─────────────────────────────────────────
+                $dcClientId2 = if ($txtClientId.Text.Trim()) { $txtClientId.Text.Trim() } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
+                $dcUrl2 = 'https://login.microsoftonline.com/common/oauth2/v2.0/devicecode'
+                $dtUrl2 = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+                $dcBytes2 = [System.Text.Encoding]::UTF8.GetBytes(
+                    "client_id=$([Uri]::EscapeDataString($dcClientId2))&scope=$([Uri]::EscapeDataString($maScope))")
+                $dcJson2 = $null
+                try {
+                    $rqD = [System.Net.HttpWebRequest]::Create($dcUrl2)
+                    $rqD.Method = "POST"; $rqD.ContentType = "application/x-www-form-urlencoded"
+                    $rqD.ContentLength = $dcBytes2.Length; $rqD.Timeout = 15000
+                    $ssD = $rqD.GetRequestStream(); $ssD.Write($dcBytes2, 0, $dcBytes2.Length); $ssD.Close()
+                    $rpD = $rqD.GetResponse()
+                    $dcJson2 = (New-Object System.IO.StreamReader($rpD.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $rpD.Close()
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Device code request failed:`n$($_.Exception.Message)", "Auth Error",
+                        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                    return
+                }
+                $dcUserCode2   = $dcJson2.user_code
+                $dcDevCode2    = $dcJson2.device_code
+                $dcVerify2     = if ($dcJson2.verification_uri) { $dcJson2.verification_uri } else { $dcJson2.verification_url }
+                $dcPoll2       = [int]$dcJson2.interval; if ($dcPoll2 -lt 5) { $dcPoll2 = 5 }
+                # Use hashtable to share state with timer/button closures (plain variables don't mutate across scriptblock scopes)
+                $dcState = @{ Tok = $null; Err = $null; Cancel = $false }
+
+                $dcF2 = New-Object System.Windows.Forms.Form
+                $dcF2.Text            = "Sign in to Microsoft  —  Additional Tests"
+                $dcF2.Size            = New-Object System.Drawing.Size(440, 210)
+                $dcF2.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+                $dcF2.MinimizeBox     = $false
+                $dcF2.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+                $dL1 = New-Object System.Windows.Forms.Label;    $dL1.Text = "1.  Open a browser and go to:"; $dL1.Location = New-Object System.Drawing.Point(12,14); $dL1.AutoSize = $true
+                $dLnk = New-Object System.Windows.Forms.LinkLabel; $dLnk.Text = $dcVerify2; $dLnk.Location = New-Object System.Drawing.Point(28,34); $dLnk.AutoSize = $true
+                $dLnk.Add_LinkClicked({ [System.Diagnostics.Process]::Start($dLnk.Text) })
+                $dL2 = New-Object System.Windows.Forms.Label;    $dL2.Text = "2.  Enter this code:"; $dL2.Location = New-Object System.Drawing.Point(12,62); $dL2.AutoSize = $true
+                $dCodeLbl = New-Object System.Windows.Forms.Label; $dCodeLbl.Text = $dcUserCode2
+                $dCodeLbl.Font = New-Object System.Drawing.Font("Consolas",22,[System.Drawing.FontStyle]::Bold)
+                $dCodeLbl.Location = New-Object System.Drawing.Point(28,80); $dCodeLbl.AutoSize = $true; $dCodeLbl.ForeColor = [System.Drawing.Color]::DarkBlue
+                $dCopy = New-Object System.Windows.Forms.Button; $dCopy.Text = "Copy"; $dCopy.Location = New-Object System.Drawing.Point(340,82); $dCopy.Size = New-Object System.Drawing.Size(72,26)
+                $dCopy.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($dcUserCode2) })
+                $dWait = New-Object System.Windows.Forms.Label;  $dWait.Text = "Waiting for sign-in…"; $dWait.Location = New-Object System.Drawing.Point(12,144); $dWait.AutoSize = $true; $dWait.ForeColor = [System.Drawing.Color]::Gray
+                $dCancelBtn = New-Object System.Windows.Forms.Button; $dCancelBtn.Text = "Cancel"; $dCancelBtn.Location = New-Object System.Drawing.Point(340,140); $dCancelBtn.Size = New-Object System.Drawing.Size(72,26)
+                $dCancelBtn.Add_Click({ $dcState.Cancel = $true; $dcF2.Close() })
+                $dcF2.Controls.AddRange(@($dL1,$dLnk,$dL2,$dCodeLbl,$dCopy,$dWait,$dCancelBtn))
+
+                $dpTimer = New-Object System.Windows.Forms.Timer; $dpTimer.Interval = $dcPoll2 * 1000
+                $dpTimer.Add_Tick({
+                    if ($dcState.Tok -or $dcState.Err -or $dcState.Cancel) { return }
+                    $pb2 = [System.Text.Encoding]::UTF8.GetBytes(
+                        "grant_type=urn:ietf:params:oauth:grant-type:device_code" +
+                        "&client_id=$([Uri]::EscapeDataString($dcClientId2))" +
+                        "&device_code=$([Uri]::EscapeDataString($dcDevCode2))")
+                    try {
+                        $rq2 = [System.Net.HttpWebRequest]::Create($dtUrl2)
+                        $rq2.Method = "POST"; $rq2.ContentType = "application/x-www-form-urlencoded"
+                        $rq2.ContentLength = $pb2.Length; $rq2.Timeout = 4000
+                        $ss2 = $rq2.GetRequestStream(); $ss2.Write($pb2, 0, $pb2.Length); $ss2.Close()
+                        try {
+                            $rp2  = $rq2.GetResponse()
+                            $tj2  = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                            $rp2.Close()
+                            if ($tj2.access_token) { $dcState.Tok = "Bearer $($tj2.access_token)"; $dcF2.Close() }
+                        } catch [System.Net.WebException] {
+                            $ex2 = $_.Exception
+                            if ($ex2.Response) {
+                                $ej2 = (New-Object System.IO.StreamReader($ex2.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                                $ex2.Response.Close()
+                                switch ($ej2.error) {
+                                    'authorization_pending' {}
+                                    'slow_down'             { $dpTimer.Interval += 5000 }
+                                    default                 { $dcState.Err = "$($ej2.error): $($ej2.error_description)"; $dcF2.Close() }
+                                }
+                            }
+                        }
+                    } catch {}
+                })
+                $dcF2.Add_Shown({ $dpTimer.Start() })
+                $dcF2.Add_FormClosed({ $dpTimer.Stop() })
+                [void]$dcF2.ShowDialog()
+                $dpTimer.Dispose(); $dcF2.Dispose()
+
+                if ($dcState.Cancel -or (-not $dcState.Tok -and -not $dcState.Err)) { return }
+                if ($dcState.Err) {
+                    [System.Windows.Forms.MessageBox]::Show("Sign-in error: $($dcState.Err)", "Auth Error",
+                        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                    return
+                }
+                $authHeader             = $dcState.Tok
+                $script:LastToken       = $authHeader
+                $script:LastTokenExpiry = (Get-Date).AddMinutes(55)
+
+            } else {
+                # ── Auth Code Flow + PKCE ────────────────────────────────────
+                $acfCid = $txtClientId.Text.Trim()
+                $acfTid = $txtTenantId.Text.Trim()
+                if (-not $acfCid -or -not $acfTid) {
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Client ID and Tenant ID are required for Auth Code Flow.",
+                        "Config Required", [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                    return
+                }
+                $rng3 = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+                $rngB3 = [byte[]]::new(48); $rng3.GetBytes($rngB3); $rng3.Dispose()
+                $ver3  = [Convert]::ToBase64String($rngB3) -replace '\+','-' -replace '/','_' -replace '=',''
+                $sha3  = [System.Security.Cryptography.SHA256Managed]::new()
+                $chal3 = [Convert]::ToBase64String($sha3.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($ver3))) -replace '\+','-' -replace '/','_' -replace '=',''
+                $sha3.Dispose()
+                $tcpT3 = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+                $tcpT3.Start(); $port3 = $tcpT3.LocalEndpoint.Port; $tcpT3.Stop()
+                $redir3   = "http://localhost:$port3/"
+                $state3   = [Guid]::NewGuid().ToString('N')
+                $tokUrl3  = "https://login.microsoftonline.com/$([Uri]::EscapeDataString($acfTid))/oauth2/v2.0/token"
+                $authUrl3 = "https://login.microsoftonline.com/$([Uri]::EscapeDataString($acfTid))/oauth2/v2.0/authorize" +
+                    "?client_id=$([Uri]::EscapeDataString($acfCid))" +
+                    "&response_type=code&redirect_uri=$([Uri]::EscapeDataString($redir3))" +
+                    "&scope=$([Uri]::EscapeDataString($maScope))&state=$([Uri]::EscapeDataString($state3))" +
+                    "&code_challenge=$([Uri]::EscapeDataString($chal3))&code_challenge_method=S256&prompt=select_account"
+
+                $a3Sync = [hashtable]::Synchronized(@{ Code=$null; Err=$null; Cancel=$false; Done=$false; DotCount=0 })
+                $a3Rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+                $a3Rs.ApartmentState = [System.Threading.ApartmentState]::STA
+                $a3Rs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+                $a3Rs.Open()
+                $a3Rs.SessionStateProxy.SetVariable('a3Sync',  $a3Sync)
+                $a3Rs.SessionStateProxy.SetVariable('port3',   $port3)
+                $a3Rs.SessionStateProxy.SetVariable('state3',  $state3)
+                $a3Ps = [System.Management.Automation.PowerShell]::Create(); $a3Ps.Runspace = $a3Rs
+                [void]$a3Ps.AddScript({
+                    $hl3 = [System.Net.HttpListener]::new(); $hl3.Prefixes.Add("http://localhost:$port3/"); $hl3.Start()
+                    try {
+                        $ar3 = $hl3.BeginGetContext($null,$null); $dl3 = (Get-Date).AddMinutes(5)
+                        while (-not $ar3.IsCompleted -and (Get-Date) -lt $dl3) {
+                            if ($a3Sync.Cancel) { $hl3.Stop(); return }
+                            [System.Threading.Thread]::Sleep(200)
+                        }
+                        if (-not $ar3.IsCompleted) { $hl3.Stop(); if (-not $a3Sync.Cancel) { $a3Sync.Err = 'Timed out' }; return }
+                        $ctx3 = $hl3.EndGetContext($ar3); $qs3 = $ctx3.Request.QueryString
+                        $code3 = $qs3['code']; $ok3 = $code3 -and $qs3['state'] -eq $state3
+                        $htm3 = if ($ok3) {'<html><body style="font-family:sans-serif;padding:40px"><h2 style="color:green">&#10003; Signed in</h2><p>You may close this tab.</p></body></html>'} else {'<html><body style="font-family:sans-serif;padding:40px"><h2 style="color:red">&#10007; Sign-in failed</h2></body></html>'}
+                        $hb3 = [System.Text.Encoding]::UTF8.GetBytes($htm3)
+                        $ctx3.Response.ContentType = 'text/html; charset=utf-8'; $ctx3.Response.ContentLength64 = $hb3.Length
+                        $ctx3.Response.OutputStream.Write($hb3,0,$hb3.Length); $ctx3.Response.OutputStream.Close(); $ctx3.Response.Close()
+                        if ($ok3) { $a3Sync.Code = $code3 } else { $a3Sync.Err = $qs3['error'] }
+                    } catch { if (-not $a3Sync.Cancel) { $a3Sync.Err = $_.Exception.Message } }
+                    finally { try { $hl3.Stop(); $hl3.Close() } catch {}; $a3Sync.Done = $true }
+                })
+                [void]$a3Ps.BeginInvoke()
+                [System.Diagnostics.Process]::Start($authUrl3) | Out-Null
+
+                $a3F = New-Object System.Windows.Forms.Form
+                $a3F.Text = "Sign in — Additional Tests"; $a3F.Size = New-Object System.Drawing.Size(480,155)
+                $a3F.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+                $a3F.MinimizeBox = $false; $a3F.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+                $a3L0 = New-Object System.Windows.Forms.Label; $a3L0.Text = "Sign in to Microsoft in your browser."
+                $a3L0.Location = New-Object System.Drawing.Point(12,12); $a3L0.Size = New-Object System.Drawing.Size(450,18)
+                $a3L0.Font = New-Object System.Drawing.Font($a3F.Font,[System.Drawing.FontStyle]::Bold)
+                $a3LW = New-Object System.Windows.Forms.Label; $a3LW.Text = "Waiting for authentication…"
+                $a3LW.Location = New-Object System.Drawing.Point(12,38); $a3LW.Size = New-Object System.Drawing.Size(450,18); $a3LW.ForeColor = [System.Drawing.Color]::Gray
+                $a3Dots = New-Object System.Windows.Forms.Label; $a3Dots.Text = ""; $a3Dots.Location = New-Object System.Drawing.Point(12,62); $a3Dots.AutoSize = $true; $a3Dots.ForeColor = [System.Drawing.Color]::SteelBlue
+                $a3CancelBtn = New-Object System.Windows.Forms.Button; $a3CancelBtn.Text = "Cancel"; $a3CancelBtn.Location = New-Object System.Drawing.Point(390,90); $a3CancelBtn.Size = New-Object System.Drawing.Size(72,26)
+                $a3CancelBtn.Add_Click({ $a3Sync.Cancel = $true; $a3F.Close() })
+                $a3F.Controls.AddRange(@($a3L0,$a3LW,$a3Dots,$a3CancelBtn))
+                $a3Poll = New-Object System.Windows.Forms.Timer; $a3Poll.Interval = 300
+                $a3Poll.Add_Tick({
+                    if ($a3Sync.Done -or $a3Sync.Cancel) { $a3F.Close(); return }
+                    $a3Sync.DotCount = (($a3Sync.DotCount + 1) % 6); $a3Dots.Text = '.' * ($a3Sync.DotCount + 1)
+                })
+                $a3F.Add_Shown({ $a3Sync.DotCount = 0; $a3Poll.Start() })
+                $a3F.Add_FormClosed({ $a3Poll.Stop() })
+                [void]$a3F.ShowDialog()
+                $a3Poll.Dispose(); $a3F.Dispose()
+                try { $a3Ps.Stop() } catch {}; $a3Ps.Dispose(); $a3Rs.Close(); $a3Rs.Dispose()
+
+                if ($a3Sync.Cancel -or (-not $a3Sync.Code -and -not $a3Sync.Err)) { return }
+                if ($a3Sync.Err) {
+                    [System.Windows.Forms.MessageBox]::Show("Sign-in error: $($a3Sync.Err)", "Auth Error",
+                        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                    return
+                }
+                $a3TokBody  = "grant_type=authorization_code&client_id=$([Uri]::EscapeDataString($acfCid))" +
+                    "&code=$([Uri]::EscapeDataString($a3Sync.Code))&redirect_uri=$([Uri]::EscapeDataString($redir3))" +
+                    "&code_verifier=$([Uri]::EscapeDataString($ver3))"
+                $a3TokBytes = [System.Text.Encoding]::UTF8.GetBytes($a3TokBody)
+                $a3Tok = $null
+                try {
+                    $a3Rq = [System.Net.HttpWebRequest]::Create($tokUrl3)
+                    $a3Rq.Method = "POST"; $a3Rq.ContentType = "application/x-www-form-urlencoded"
+                    $a3Rq.ContentLength = $a3TokBytes.Length; $a3Rq.Timeout = 15000
+                    $a3Ss = $a3Rq.GetRequestStream(); $a3Ss.Write($a3TokBytes,0,$a3TokBytes.Length); $a3Ss.Close()
+                    $a3Rp = $a3Rq.GetResponse()
+                    $a3TJ = (New-Object System.IO.StreamReader($a3Rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $a3Rp.Close(); $a3Tok = $a3TJ.access_token
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show("Token exchange failed: $($_.Exception.Message)", "Auth Error",
+                        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                    return
+                }
+                if (-not $a3Tok) {
+                    [System.Windows.Forms.MessageBox]::Show("Token exchange returned no access token.", "Auth Error",
+                        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                    return
+                }
+                $authHeader             = "Bearer $a3Tok"
+                $script:LastToken       = $authHeader
+                $script:LastTokenExpiry = (Get-Date).AddMinutes(55)
+            }
+        }
+    } elseif ($radWIA.Checked) {
+        if (-not $chkUseCurrentUser.Checked -and $txtPass.Text) {
+            $netCred = New-Object System.Net.NetworkCredential($txtEmail.Text.Trim(), $txtPass.Text)
+        } else {
+            $useWinAuth = $true
+        }
+    }
 
     # ── Dialog ───────────────────────────────────────────────────────────────
     $dlg = New-Object System.Windows.Forms.Form
@@ -1877,7 +2124,7 @@ $btnAddTests.Add_Click({
         Total  = $urlList.Count
     })
 
-    # Background runspace: probe each URL using Windows Integrated Auth
+    # Background runspace: probe each URL with the selected auth method
     $uRs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $uRs.ApartmentState = [System.Threading.ApartmentState]::STA
     $uRs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
@@ -1885,6 +2132,9 @@ $btnAddTests.Add_Click({
     $uRs.SessionStateProxy.SetVariable('uSync',      $uSync)
     $uRs.SessionStateProxy.SetVariable('urlList',    $urlList)
     $uRs.SessionStateProxy.SetVariable('ignoreCert', $ignoreCert)
+    $uRs.SessionStateProxy.SetVariable('authHeader', $authHeader)
+    $uRs.SessionStateProxy.SetVariable('useWinAuth', $useWinAuth)
+    $uRs.SessionStateProxy.SetVariable('netCred',    $netCred)
 
     $uPs = [System.Management.Automation.PowerShell]::Create()
     $uPs.Runspace = $uRs
@@ -1904,11 +2154,17 @@ $btnAddTests.Add_Click({
             $info   = ''
             try {
                 $req = [System.Net.HttpWebRequest]::Create($url)
-                $req.Method                = "GET"
-                $req.AllowAutoRedirect     = $false
-                $req.Timeout               = 10000
-                $req.UserAgent             = "Microsoft Office/16.0 (Windows NT 10.0)"
-                $req.UseDefaultCredentials = $true
+                $req.Method            = "GET"
+                $req.AllowAutoRedirect = $false
+                $req.Timeout           = 10000
+                $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
+                if ($authHeader) {
+                    $req.Headers["Authorization"] = $authHeader
+                } elseif ($useWinAuth) {
+                    $req.UseDefaultCredentials = $true
+                } elseif ($netCred) {
+                    $req.Credentials = $netCred
+                }
                 try {
                     $rp     = $req.GetResponse()
                     $status = [int]$rp.StatusCode
@@ -1974,7 +2230,7 @@ $btnAddTests.Add_Click({
     $dlg.Add_FormClosed({
         $uSync.Cancel = $true
         $uTimer.Stop()
-        try { $uPs.Stop() }   catch {}
+        try { $uPs.Stop() }    catch {}
         try { $uPs.Dispose() } catch {}
         try { $uRs.Close(); $uRs.Dispose() } catch {}
     })
