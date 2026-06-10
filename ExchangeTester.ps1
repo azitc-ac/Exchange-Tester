@@ -168,12 +168,20 @@ $form.Controls.Add($lblClientId)
 
 $txtClientId = New-Object System.Windows.Forms.TextBox
 $txtClientId.Location  = New-Object System.Drawing.Point(126, 133)
-$txtClientId.Size      = New-Object System.Drawing.Size(460, 22)
+$txtClientId.Size      = New-Object System.Drawing.Size(356, 22)
 $txtClientId.Text      = ''
 $txtClientId.Visible   = $false
 $txtClientId.TabIndex  = 7
 $txtClientId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
 $form.Controls.Add($txtClientId)
+
+$btnCreateApp = New-Object System.Windows.Forms.Button
+$btnCreateApp.Text     = "Register App"
+$btnCreateApp.Location = New-Object System.Drawing.Point(486, 133)
+$btnCreateApp.Size     = New-Object System.Drawing.Size(100, 22)
+$btnCreateApp.Visible  = $false
+$btnCreateApp.TabIndex = 99
+$form.Controls.Add($btnCreateApp)
 
 $lblTenantId = New-Object System.Windows.Forms.Label
 $lblTenantId.Text      = "Tenant ID:"
@@ -994,10 +1002,11 @@ function Update-AuthMode {
 # based on whether ACF rows are visible
 function Update-Layout {
     $showACF = $radACF.Checked -and $radModernAuth.Checked
-    $lblClientId.Visible = $showACF
-    $txtClientId.Visible = $showACF
-    $lblTenantId.Visible = $showACF
-    $txtTenantId.Visible = $showACF
+    $lblClientId.Visible  = $showACF
+    $txtClientId.Visible  = $showACF
+    $btnCreateApp.Visible = $showACF
+    $lblTenantId.Visible  = $showACF
+    $txtTenantId.Visible  = $showACF
     $y = if ($showACF) { 179 } else { 133 }
     $chkIgnoreCert.Top = $y
     $chkUseSCP.Top     = $y
@@ -1048,6 +1057,207 @@ $chkUseCurrentUser.Add_CheckedChanged({
     $lblPass.Enabled = $useExplicit
     $txtPass.Enabled = $useExplicit
     if (-not $useExplicit) { $txtPass.Clear() }
+})
+
+# Config file path (same directory as this script)
+$script:configPath = Join-Path (if ($PSScriptRoot) { $PSScriptRoot } else {
+    Split-Path $MyInvocation.MyCommand.Path }) "ExchangeTester.config"
+
+$btnCreateApp.Add_Click({
+    $tenantId = $txtTenantId.Text.Trim()
+    if (-not $tenantId) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please detect or enter the Tenant ID first.",
+            "Tenant ID Required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    # ── Acquire admin Graph token via Device Code Flow ────────────────────────
+    # Microsoft Graph Command Line Tools: broad admin delegated scope support
+    $graphApp   = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+    $dcUrl      = "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenantId))/oauth2/v2.0/devicecode"
+    $tokUrl     = "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenantId))/oauth2/v2.0/token"
+    $graphScope = 'https://graph.microsoft.com/.default offline_access'
+
+    $dcBytes = [System.Text.Encoding]::UTF8.GetBytes(
+        "client_id=$([Uri]::EscapeDataString($graphApp))&scope=$([Uri]::EscapeDataString($graphScope))")
+    $dcJson = $null
+    try {
+        $rq = [System.Net.HttpWebRequest]::Create($dcUrl)
+        $rq.Method = "POST"; $rq.ContentType = "application/x-www-form-urlencoded"
+        $rq.ContentLength = $dcBytes.Length; $rq.Timeout = 15000
+        $ss = $rq.GetRequestStream(); $ss.Write($dcBytes, 0, $dcBytes.Length); $ss.Close()
+        $rp = $rq.GetResponse()
+        $dcJson = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp.Close()
+    } catch [System.Net.WebException] {
+        $exT = $_.Exception
+        $msg = if ($exT.Response) {
+            try { $ej=(New-Object System.IO.StreamReader($exT.Response.GetResponseStream())).ReadToEnd()|ConvertFrom-Json; $exT.Response.Close(); "$($ej.error): $($ej.error_description)" } catch { $exT.Message }
+        } else { $exT.Message }
+        [System.Windows.Forms.MessageBox]::Show($msg, "Auth Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    $userCode   = $dcJson.user_code
+    $deviceCode = $dcJson.device_code
+    $verifyUri  = if ($dcJson.verification_uri) { $dcJson.verification_uri } else { $dcJson.verification_url }
+    $pollSec    = [int]$dcJson.interval; if ($pollSec -lt 5) { $pollSec = 5 }
+
+    # Hashtable used for state sharing across closures (avoids PS variable-scope issues)
+    $adm = @{ Token = $null; Err = $null; Cancel = $false }
+
+    $aForm = New-Object System.Windows.Forms.Form
+    $aForm.Text            = "Sign in  —  Create App Registration"
+    $aForm.Size            = New-Object System.Drawing.Size(490, 240)
+    $aForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $aForm.MinimizeBox     = $false
+    $aForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+
+    $aL0 = New-Object System.Windows.Forms.Label
+    $aL0.Text      = "Sign in as Application Administrator or Global Admin."
+    $aL0.Location  = New-Object System.Drawing.Point(12, 10)
+    $aL0.Size      = New-Object System.Drawing.Size(460, 18)
+    $aL0.Font      = New-Object System.Drawing.Font($aForm.Font, [System.Drawing.FontStyle]::Bold)
+
+    $aL1 = New-Object System.Windows.Forms.Label
+    $aL1.Text = "1.  Open a browser and go to:"
+    $aL1.Location = New-Object System.Drawing.Point(12, 36); $aL1.AutoSize = $true
+
+    $aLnk = New-Object System.Windows.Forms.LinkLabel
+    $aLnk.Text = $verifyUri
+    $aLnk.Location = New-Object System.Drawing.Point(28, 55); $aLnk.AutoSize = $true
+    $aLnk.Add_LinkClicked({ [System.Diagnostics.Process]::Start($aLnk.Text) })
+
+    $aL2 = New-Object System.Windows.Forms.Label
+    $aL2.Text = "2.  Enter this code:"
+    $aL2.Location = New-Object System.Drawing.Point(12, 81); $aL2.AutoSize = $true
+
+    $aCode = New-Object System.Windows.Forms.Label
+    $aCode.Text = $userCode
+    $aCode.Font = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold)
+    $aCode.Location = New-Object System.Drawing.Point(28, 99); $aCode.AutoSize = $true
+    $aCode.ForeColor = [System.Drawing.Color]::DarkBlue
+
+    $aCopy = New-Object System.Windows.Forms.Button
+    $aCopy.Text = "Copy"; $aCopy.Location = New-Object System.Drawing.Point(390, 101)
+    $aCopy.Size = New-Object System.Drawing.Size(72, 26)
+    $aCopy.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($userCode) })
+
+    $aWait = New-Object System.Windows.Forms.Label
+    $aWait.Text = "Waiting for sign-in…"; $aWait.Location = New-Object System.Drawing.Point(12, 154)
+    $aWait.AutoSize = $true; $aWait.ForeColor = [System.Drawing.Color]::Gray
+
+    $aCancel = New-Object System.Windows.Forms.Button
+    $aCancel.Text = "Cancel"; $aCancel.Location = New-Object System.Drawing.Point(390, 150)
+    $aCancel.Size = New-Object System.Drawing.Size(72, 26)
+    $aCancel.Add_Click({ $adm.Cancel = $true; $aForm.Close() })
+
+    $aForm.Controls.AddRange(@($aL0, $aL1, $aLnk, $aL2, $aCode, $aCopy, $aWait, $aCancel))
+
+    $aPoll = New-Object System.Windows.Forms.Timer
+    $aPoll.Interval = $pollSec * 1000
+    $aPoll.Add_Tick({
+        if ($adm.Token -or $adm.Err -or $adm.Cancel) { return }
+        $pb = [System.Text.Encoding]::UTF8.GetBytes(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code" +
+            "&client_id=$([Uri]::EscapeDataString($graphApp))" +
+            "&device_code=$([Uri]::EscapeDataString($deviceCode))")
+        try {
+            $rq2 = [System.Net.HttpWebRequest]::Create($tokUrl)
+            $rq2.Method = "POST"; $rq2.ContentType = "application/x-www-form-urlencoded"
+            $rq2.ContentLength = $pb.Length; $rq2.Timeout = 4000
+            $ss2 = $rq2.GetRequestStream(); $ss2.Write($pb, 0, $pb.Length); $ss2.Close()
+            try {
+                $rp2 = $rq2.GetResponse()
+                $tJ  = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                $rp2.Close()
+                if ($tJ.access_token) { $adm.Token = $tJ.access_token; $aForm.Close() }
+            } catch [System.Net.WebException] {
+                $ex2 = $_.Exception
+                if ($ex2.Response) {
+                    $ej2 = (New-Object System.IO.StreamReader($ex2.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $ex2.Response.Close()
+                    switch ($ej2.error) {
+                        'authorization_pending' {}
+                        'slow_down' { $aPoll.Interval += 5000 }
+                        default     { $adm.Err = "$($ej2.error): $($ej2.error_description)"; $aForm.Close() }
+                    }
+                }
+            }
+        } catch {}
+    })
+    $aForm.Add_Shown({ $aPoll.Start() })
+    $aForm.Add_FormClosed({ $aPoll.Stop() })
+    [void]$aForm.ShowDialog()
+    $aPoll.Dispose(); $aForm.Dispose()
+
+    if ($adm.Cancel -or (-not $adm.Token -and -not $adm.Err)) { return }
+    if ($adm.Err) {
+        [System.Windows.Forms.MessageBox]::Show("Sign-in error: $($adm.Err)", "Auth Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    # ── Create app registration via Microsoft Graph ───────────────────────────
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $appBody  = '{"displayName":"Exchange Tester","isFallbackPublicClient":true}'
+    $appBytes = [System.Text.Encoding]::UTF8.GetBytes($appBody)
+    $newId    = $null
+    try {
+        $rq3 = [System.Net.HttpWebRequest]::Create("https://graph.microsoft.com/v1.0/applications")
+        $rq3.Method = "POST"; $rq3.ContentType = "application/json"
+        $rq3.ContentLength = $appBytes.Length; $rq3.Timeout = 20000
+        $rq3.Headers["Authorization"] = "Bearer $($adm.Token)"
+        $ss3 = $rq3.GetRequestStream(); $ss3.Write($appBytes, 0, $appBytes.Length); $ss3.Close()
+        $rp3  = $rq3.GetResponse()
+        $aJ   = (New-Object System.IO.StreamReader($rp3.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp3.Close()
+        $newId = $aJ.appId
+    } catch [System.Net.WebException] {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        $exT3 = $_.Exception
+        $m3 = if ($exT3.Response) {
+            try { $e3=(New-Object System.IO.StreamReader($exT3.Response.GetResponseStream())).ReadToEnd()|ConvertFrom-Json; $exT3.Response.Close(); "$($e3.error.code): $($e3.error.message)" } catch { $exT3.Message }
+        } else { $exT3.Message }
+        [System.Windows.Forms.MessageBox]::Show($m3, "App Registration Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    } catch {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+    $form.Cursor = [System.Windows.Forms.Cursors]::Default
+
+    # ── Save config and update UI ─────────────────────────────────────────────
+    try {
+        [System.IO.File]::WriteAllText($script:configPath,
+            (ConvertTo-Json @{ ClientId = $newId }),
+            [System.Text.Encoding]::UTF8)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "App created but config could not be saved:`n$($_.Exception.Message)",
+            "Warning", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    }
+
+    $txtClientId.Text = $newId
+    [System.Windows.Forms.MessageBox]::Show(
+        "App registration 'Exchange Tester' created successfully.`n`nClient ID:`n$newId`n`nSaved to ExchangeTester.config.",
+        "App Registration Created",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
 })
 
 $btnTest.Add_Click({
@@ -1160,6 +1370,14 @@ $form.Add_FormClosing({
 #==============================================================================
 #  START
 #==============================================================================
+
+# Load saved config (Client ID from a previous "Register App")
+if (Test-Path $script:configPath) {
+    try {
+        $cfg = Get-Content $script:configPath -Raw | ConvertFrom-Json
+        if ($cfg.ClientId) { $txtClientId.Text = $cfg.ClientId }
+    } catch {}
+}
 
 # Detect domain-joined status and set SCP checkbox accordingly
 $chkUseSCP.Checked = $false
