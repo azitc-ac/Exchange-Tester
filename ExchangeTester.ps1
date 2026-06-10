@@ -1007,10 +1007,41 @@ function Update-Layout {
     $tabCtrl.Height    = $form.ClientSize.Height - ($y + 50) - 9
 }
 
+# Looks up the tenant ID for the domain in $txtEmail via the OIDC discovery endpoint.
+# Runs synchronously with DoEvents so "Detecting…" is visible before the HTTP call.
+# Triggered when ACF is selected or when the email field loses focus while ACF is active.
+function Resolve-TenantId {
+    if (-not $radACF.Checked) { return }
+    $email = $txtEmail.Text.Trim()
+    if ($email -notmatch '@([^@\s]+)$') { return }
+    $domain = $Matches[1]
+    $txtTenantId.Text    = "Detecting…"
+    $txtTenantId.Enabled = $false
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    [System.Windows.Forms.Application]::DoEvents()
+    $tid = $null
+    try {
+        $req = [System.Net.HttpWebRequest]::Create(
+            "https://login.microsoftonline.com/$([Uri]::EscapeDataString($domain))/.well-known/openid-configuration")
+        $req.Method  = "GET"
+        $req.Timeout = 8000
+        $rp = $req.GetResponse()
+        $j  = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp.Close()
+        if ($j.token_endpoint -match '/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/') {
+            $tid = $Matches[1]
+        }
+    } catch {}
+    $txtTenantId.Text    = if ($tid) { $tid } else { '' }
+    $txtTenantId.Enabled = $true
+    $form.Cursor         = [System.Windows.Forms.Cursors]::Default
+}
+
 $radModernAuth.Add_CheckedChanged({ if ($radModernAuth.Checked) { Update-AuthMode } })
 $radWIA.Add_CheckedChanged({        if ($radWIA.Checked)        { Update-AuthMode } })
 $radDCF.Add_CheckedChanged({        if ($radDCF.Checked)        { Update-Layout  } })
-$radACF.Add_CheckedChanged({        if ($radACF.Checked)        { Update-Layout  } })
+$radACF.Add_CheckedChanged({        if ($radACF.Checked)        { Update-Layout; Resolve-TenantId } })
+$txtEmail.Add_Leave({ Resolve-TenantId })
 
 $chkUseCurrentUser.Add_CheckedChanged({
     $useExplicit     = -not $chkUseCurrentUser.Checked
