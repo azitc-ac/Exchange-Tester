@@ -103,6 +103,14 @@ $btnCancel.Size     = New-Object System.Drawing.Size(68, 26)
 $btnCancel.Enabled  = $false
 $btnCancel.TabIndex = 10
 $form.Controls.Add($btnCancel)
+
+$btnAddTests = New-Object System.Windows.Forms.Button
+$btnAddTests.Text     = "Additional Tests"
+$btnAddTests.Location = New-Object System.Drawing.Point(620, 92)
+$btnAddTests.Size     = New-Object System.Drawing.Size(144, 26)
+$btnAddTests.Enabled  = $false
+$btnAddTests.TabIndex = 11
+$form.Controls.Add($btnAddTests)
 #endregion
 
 #region --- Modern Auth sub-options (Panel keeps radDCF/radACF exclusive with each other only) ---
@@ -377,10 +385,12 @@ function ConvertFrom-AutodiscoverXml {
             & $add "Account" "Redirect URL"      (& $txt $account "ad:RedirectUrl")
         }
 
-        # --- Protocol sections (EXCH, EXPR, IMAP, POP3, SMTP, WEB, ...) ---
+        # --- Protocol sections (EXCH, EXPR, EXHTTP, mapiHttp, WEB, ...) ---
         $protocols = $xd.SelectNodes("//ad:Protocol", $ns)
         foreach ($proto in $protocols) {
-            $type = & $txt $proto "ad:Type"
+            $typeNode = $proto.SelectSingleNode("ad:Type", $ns)
+            # mapiHttp uses Type as an XML attribute instead of a child element
+            $type = if ($typeNode) { $typeNode.InnerText } else { $proto.GetAttribute("Type") }
             if (-not $type) { $type = "Unknown" }
             $grp = "Protocol: $type"
 
@@ -405,6 +415,14 @@ function ConvertFrom-AutodiscoverXml {
             $extOwa = $proto.SelectSingleNode("ad:External/ad:OWAUrl", $ns)
             if ($inOwa)  { & $add $grp "OWA URL (Internal)" $inOwa.InnerText }
             if ($extOwa) { & $add $grp "OWA URL (External)" $extOwa.InnerText }
+
+            # mapiHttp: MailStore and AddressBook have InternalUrl/ExternalUrl children
+            foreach ($store in @("MailStore", "AddressBook")) {
+                $nInt = $proto.SelectSingleNode("ad:$store/ad:InternalUrl", $ns)
+                $nExt = $proto.SelectSingleNode("ad:$store/ad:ExternalUrl", $ns)
+                if ($nInt) { & $add $grp "$store Internal URL" $nInt.InnerText }
+                if ($nExt) { & $add $grp "$store External URL" $nExt.InnerText }
+            }
         }
     } catch {
         $rows.Add([PSCustomObject]@{
@@ -417,6 +435,62 @@ function ConvertFrom-AutodiscoverXml {
     return ,$rows   # comma forces List to stay as-is, not unroll
 }
 
+# Extract all testable (absolute https?://) URLs from AutoDiscover XML, deduplicated
+function Get-AutodiscoverUrls {
+    param([string]$RawXml)
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $seen    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    $addUrl = {
+        param([string]$protoType, [string]$field, [string]$url)
+        if (-not $url) { return }
+        $url = $url.Trim()
+        if ($url -notmatch '^https?://') { return }
+        if ($seen.Add($url)) {
+            $results.Add([PSCustomObject]@{
+                Protocol = $protoType
+                Field    = $field
+                Url      = $url
+            })
+        }
+    }
+
+    try {
+        $xd = [xml]$RawXml
+        $ns = New-Object System.Xml.XmlNamespaceManager($xd.NameTable)
+        $ns.AddNamespace("ad", "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a")
+
+        $protocols = $xd.SelectNodes("//ad:Protocol", $ns)
+        foreach ($proto in $protocols) {
+            $typeNode  = $proto.SelectSingleNode("ad:Type", $ns)
+            $protoType = if ($typeNode) { $typeNode.InnerText } else { $proto.GetAttribute("Type") }
+            if (-not $protoType) { $protoType = "?" }
+
+            foreach ($f in @("EwsUrl","ASUrl","OABUrl","OofUrl","EcpUrl","SharingUrl","EmwsUrl","UMUrl","EwsPartnerUrl")) {
+                $n = $proto.SelectSingleNode("ad:$f", $ns)
+                if ($n) { & $addUrl $protoType $f $n.InnerText }
+            }
+
+            # WEB: OWA URLs nested under Internal/External
+            foreach ($dir in @("Internal","External")) {
+                $n = $proto.SelectSingleNode("ad:$dir/ad:OWAUrl", $ns)
+                if ($n) { & $addUrl $protoType "OWA ($dir)" $n.InnerText }
+            }
+
+            # mapiHttp: MailStore / AddressBook
+            foreach ($store in @("MailStore","AddressBook")) {
+                foreach ($uField in @("InternalUrl","ExternalUrl")) {
+                    $n = $proto.SelectSingleNode("ad:$store/ad:$uField", $ns)
+                    if ($n) { & $addUrl $protoType "$store.$uField" $n.InnerText }
+                }
+            }
+        }
+    } catch {}
+
+    return ,$results
+}
+
 #endregion ===================================================================
 #  TEST ENGINE  (PowerShell Runspace + WinForms Timer — avoids ThreadPool runspace issue)
 #==============================================================================
@@ -426,6 +500,7 @@ $script:CurrentPS      = $null
 $script:CurrentRS      = $null
 $script:CurrentSync    = $null
 $script:PollTimer      = $null
+$script:LastXml        = $null
 
 # The actual test logic runs inside a dedicated PS runspace.
 # $sync is the only bridge between the runspace and the UI thread.
@@ -466,7 +541,9 @@ $script:TestScript = {
             $req.ContentLength     = $bodyBytes.Length
             $req.AllowAutoRedirect = $false
             $req.Timeout           = 30000
-            $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
+            $req.UserAgent                    = "Microsoft Office/16.0 (Windows NT 10.0)"
+            $req.Headers["X-MapiHttpCapability"] = "1"   # request mapiHttp protocol block
+            $req.Headers["X-ClientCanHandle"]    = "Negotiate"
             if ($authHeader -ne '') {
                 $req.Headers["Authorization"] = $authHeader
             } elseif ($useWinAuth) {
@@ -1108,14 +1185,17 @@ function Complete-Test {
         $rtbLog.AppendText("$msg`r`n")
     }
 
-    $btnTest.Enabled   = $true
-    $btnCancel.Enabled = $false
+    $btnTest.Enabled     = $true
+    $btnCancel.Enabled   = $false
+    $btnAddTests.Enabled = $script:LastXml -ne $null
 
     if ($script:CurrentSync.Cancel) {
         $form.Text = "Test E-Mail AutoConfiguration"
         $rtbLog.AppendText("`r`nTest cancelled.`r`n")
     } elseif ($script:CurrentSync.Xml) {
         $xml = $script:CurrentSync.Xml
+        $script:LastXml      = $xml
+        $btnAddTests.Enabled = $true
 
         # XML tab: pretty-print
         try {
@@ -1646,6 +1726,7 @@ $btnTest.Add_Click({
     $prgBar.Value        = 0
     $btnTest.Enabled     = $false
     $btnCancel.Enabled   = $true
+    $btnAddTests.Enabled = $false
     $tabCtrl.SelectedTab = $tabLog
 
     # Build the sync hash that bridges UI thread and test runspace
@@ -1704,6 +1785,204 @@ $btnCancel.Add_Click({
     if ($script:CurrentSync) { $script:CurrentSync.Cancel = $true }
     $btnCancel.Enabled = $false
     $rtbLog.AppendText("Cancelling...`r`n")
+})
+
+$btnAddTests.Add_Click({
+    if (-not $script:LastXml) { return }
+
+    $urlList = Get-AutodiscoverUrls -RawXml $script:LastXml
+    if ($urlList.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No testable URLs found in the AutoDiscover response.",
+            "Additional Tests",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+
+    $ignoreCert = $chkIgnoreCert.Checked
+
+    # ── Dialog ───────────────────────────────────────────────────────────────
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = "Additional Tests  —  URL Connectivity"
+    $dlg.ClientSize      = New-Object System.Drawing.Size(952, 490)
+    $dlg.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $dlg.MinimizeBox     = $false
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.Location      = New-Object System.Drawing.Point(0, 0)
+    $lv.Size          = New-Object System.Drawing.Size(952, 444)
+    $lv.Anchor        = ([System.Windows.Forms.AnchorStyles]::Top    -bor
+                          [System.Windows.Forms.AnchorStyles]::Left   -bor
+                          [System.Windows.Forms.AnchorStyles]::Right  -bor
+                          [System.Windows.Forms.AnchorStyles]::Bottom)
+    $lv.View          = [System.Windows.Forms.View]::Details
+    $lv.FullRowSelect = $true
+    $lv.GridLines     = $true
+    $lv.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+    [void]$lv.Columns.Add("Protocol",  72)
+    [void]$lv.Columns.Add("Field",    148)
+    [void]$lv.Columns.Add("Status",    52)
+    [void]$lv.Columns.Add("URL",      430)
+    [void]$lv.Columns.Add("Auth / Info", 195)
+
+    # Right-click: copy URL
+    $ctxLv     = New-Object System.Windows.Forms.ContextMenuStrip
+    $miCopyUrl = New-Object System.Windows.Forms.ToolStripMenuItem("Copy URL")
+    [void]$ctxLv.Items.Add($miCopyUrl)
+    $miCopyUrl.Add_Click({
+        if ($lv.SelectedItems.Count -gt 0) {
+            [System.Windows.Forms.Clipboard]::SetText($lv.SelectedItems[0].SubItems[3].Text)
+        }
+    })
+    $lv.ContextMenuStrip = $ctxLv
+
+    $lblProg = New-Object System.Windows.Forms.Label
+    $lblProg.Text      = "Connecting…"
+    $lblProg.Location  = New-Object System.Drawing.Point(8, 457)
+    $lblProg.Size      = New-Object System.Drawing.Size(750, 18)
+    $lblProg.Anchor    = ([System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $lblProg.ForeColor = [System.Drawing.Color]::Gray
+
+    $btnDlgClose = New-Object System.Windows.Forms.Button
+    $btnDlgClose.Text     = "Close"
+    $btnDlgClose.Location = New-Object System.Drawing.Point(864, 453)
+    $btnDlgClose.Size     = New-Object System.Drawing.Size(80, 26)
+    $btnDlgClose.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $btnDlgClose.Add_Click({ $dlg.Close() })
+    $dlg.CancelButton = $btnDlgClose
+
+    $dlg.Controls.AddRange(@($lv, $lblProg, $btnDlgClose))
+
+    # Pre-populate rows with placeholder status
+    $lvItems = @{}
+    foreach ($entry in $urlList) {
+        $item = New-Object System.Windows.Forms.ListViewItem($entry.Protocol)
+        [void]$item.SubItems.Add($entry.Field)
+        [void]$item.SubItems.Add("…")
+        [void]$item.SubItems.Add($entry.Url)
+        [void]$item.SubItems.Add("")
+        $item.ForeColor = [System.Drawing.Color]::Gray
+        [void]$lv.Items.Add($item)
+        $lvItems[$entry.Url] = $item
+    }
+
+    # Sync bridge for runspace → UI
+    $uSync = [hashtable]::Synchronized(@{
+        Queue  = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+        Done   = $false
+        Cancel = $false
+        Tested = 0
+        Total  = $urlList.Count
+    })
+
+    # Background runspace: probe each URL using Windows Integrated Auth
+    $uRs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $uRs.ApartmentState = [System.Threading.ApartmentState]::STA
+    $uRs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+    $uRs.Open()
+    $uRs.SessionStateProxy.SetVariable('uSync',      $uSync)
+    $uRs.SessionStateProxy.SetVariable('urlList',    $urlList)
+    $uRs.SessionStateProxy.SetVariable('ignoreCert', $ignoreCert)
+
+    $uPs = [System.Management.Automation.PowerShell]::Create()
+    $uPs.Runspace = $uRs
+    [void]$uPs.AddScript({
+        if ($ignoreCert) {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        }
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.SecurityProtocolType]::Tls12 -bor
+            [System.Net.SecurityProtocolType]::Tls11 -bor
+            [System.Net.SecurityProtocolType]::Tls
+
+        foreach ($entry in $urlList) {
+            if ($uSync.Cancel) { break }
+            $url    = $entry.Url
+            $status = 0
+            $info   = ''
+            try {
+                $req = [System.Net.HttpWebRequest]::Create($url)
+                $req.Method                = "GET"
+                $req.AllowAutoRedirect     = $false
+                $req.Timeout               = 10000
+                $req.UserAgent             = "Microsoft Office/16.0 (Windows NT 10.0)"
+                $req.UseDefaultCredentials = $true
+                try {
+                    $rp     = $req.GetResponse()
+                    $status = [int]$rp.StatusCode
+                    $loc    = $rp.Headers["Location"]
+                    if ($loc) { $info = "-> $loc" }
+                    $rp.Close()
+                } catch [System.Net.WebException] {
+                    $ex = $_.Exception
+                    if ($ex.Response) {
+                        $status = [int]$ex.Response.StatusCode
+                        $loc    = $ex.Response.Headers["Location"]
+                        $wwwA   = try { $ex.Response.Headers.GetValues("WWW-Authenticate") -join " | " } catch { $null }
+                        if ($wwwA)    { $info = $wwwA }
+                        elseif ($loc) { $info = "-> $loc" }
+                        $ex.Response.Close()
+                    } else {
+                        $status = -1
+                        $inner  = $ex.InnerException
+                        $info   = if ($inner -and $inner.Message) { $inner.Message } else { $ex.Message }
+                    }
+                }
+            } catch {
+                $status = -1
+                $info   = $_.Exception.Message
+            }
+            $uSync.Queue.Enqueue(@{ Url = $url; Status = $status; Info = $info })
+            $uSync.Tested++
+        }
+        $uSync.Done = $true
+    })
+    [void]$uPs.BeginInvoke()
+
+    # Timer: drain result queue and update ListView on UI thread
+    $uTimer = New-Object System.Windows.Forms.Timer
+    $uTimer.Interval = 150
+    $uTimer.Add_Tick({
+        $upd = $null
+        while ($uSync.Queue.TryDequeue([ref]$upd)) {
+            if ($lvItems.ContainsKey($upd.Url)) {
+                $item = $lvItems[$upd.Url]
+                $s    = $upd.Status
+                $item.SubItems[2].Text = if ($s -lt 0) { "ERR" } else { "$s" }
+                $item.SubItems[4].Text = $upd.Info
+                $item.ForeColor =
+                    if     ($s -eq 200)                       { [System.Drawing.Color]::DarkGreen }
+                    elseif ($s -ge 300 -and $s -lt 400)       { [System.Drawing.Color]::DarkOrange }
+                    elseif ($s -eq 401)                       { [System.Drawing.Color]::FromArgb(160, 100, 0) }
+                    elseif ($s -ge 400)                       { [System.Drawing.Color]::DarkRed }
+                    elseif ($s -lt 0)                         { [System.Drawing.Color]::Red }
+                    else                                      { [System.Drawing.Color]::Black }
+            }
+        }
+        $lblProg.Text = "Tested $($uSync.Tested) of $($uSync.Total)…"
+        if ($uSync.Done) {
+            $uTimer.Stop()
+            $lblProg.Text      = "Done  —  $($uSync.Total) URL(s) tested."
+            $lblProg.ForeColor = [System.Drawing.Color]::Black
+            try { $uPs.Dispose() } catch {}
+            try { $uRs.Close(); $uRs.Dispose() } catch {}
+        }
+    })
+
+    $dlg.Add_FormClosed({
+        $uSync.Cancel = $true
+        $uTimer.Stop()
+        try { $uPs.Stop() }   catch {}
+        try { $uPs.Dispose() } catch {}
+        try { $uRs.Close(); $uRs.Dispose() } catch {}
+    })
+
+    $uTimer.Start()
+    [void]$dlg.ShowDialog($form)
+    $uTimer.Stop()
+    try { $uTimer.Dispose() } catch {}
 })
 
 $form.Add_FormClosing({
