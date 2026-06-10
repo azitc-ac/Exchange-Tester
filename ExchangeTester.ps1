@@ -1455,7 +1455,17 @@ $btnCreateApp.Add_Click({
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     [System.Windows.Forms.Application]::DoEvents()
 
-    $appBody  = '{"displayName":"Exchange Tester","isFallbackPublicClient":true,"publicClient":{"redirectUris":["http://localhost"]}}'
+    $appBody  = ('{"displayName":"Exchange Tester","isFallbackPublicClient":true,' +
+                '"publicClient":{"redirectUris":["http://localhost"]},' +
+                '"requiredResourceAccess":[' +
+                  '{"resourceAppId":"00000002-0000-0ff1-ce00-000000000000",' +   # Exchange Online
+                   '"resourceAccess":[{"id":"3b5f3d61-589b-4a3c-a359-5dd4b5ee5bd5","type":"Scope"}]},' +  # EWS.AccessAsUser.All
+                  '{"resourceAppId":"00000003-0000-0000-c000-000000000000",' +   # Microsoft Graph
+                   '"resourceAccess":[' +
+                     '{"id":"e1fe6dd8-ba31-4d61-89e7-88639da4683d","type":"Scope"},' +  # User.Read
+                     '{"id":"7427e0e9-2fba-42fe-b0c0-848c9e6a8182","type":"Scope"}' +   # offline_access
+                   ']}' +
+                ']}')
     $appBytes = [System.Text.Encoding]::UTF8.GetBytes($appBody)
     $newId    = $null
     try {
@@ -1485,6 +1495,78 @@ $btnCreateApp.Add_Click({
     }
     $form.Cursor = [System.Windows.Forms.Cursors]::Default
 
+    # ── Service principal + admin consent ─────────────────────────────────────
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $spId      = $null
+    $consentOk = $false
+    $consentErr = ''
+
+    # Helper: GET from Graph → parsed JSON
+    $graphGet = {
+        param([string]$url)
+        $rq = [System.Net.HttpWebRequest]::Create($url)
+        $rq.Method = "GET"; $rq.Timeout = 12000
+        $rq.Headers["Authorization"] = "Bearer $adminToken"
+        $rp = $rq.GetResponse()
+        $j = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp.Close(); return $j
+    }
+    # Helper: POST JSON to Graph → parsed JSON (or $null on error, sets $consentErr)
+    $graphPost = {
+        param([string]$url, [string]$body)
+        $b = [System.Text.Encoding]::UTF8.GetBytes($body)
+        $rq = [System.Net.HttpWebRequest]::Create($url)
+        $rq.Method = "POST"; $rq.ContentType = "application/json"
+        $rq.ContentLength = $b.Length; $rq.Timeout = 20000
+        $rq.Headers["Authorization"] = "Bearer $adminToken"
+        $ss = $rq.GetRequestStream(); $ss.Write($b, 0, $b.Length); $ss.Close()
+        try {
+            $rp = $rq.GetResponse()
+            $j = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+            $rp.Close(); return $j
+        } catch [System.Net.WebException] {
+            $ex = $_.Exception
+            if ($ex.Response -and [int]$ex.Response.StatusCode -eq 409) {
+                $ex.Response.Close(); return 'conflict'   # signal: already exists
+            }
+            $m = if ($ex.Response) {
+                try { $ej=(New-Object System.IO.StreamReader($ex.Response.GetResponseStream())).ReadToEnd()|ConvertFrom-Json; $ex.Response.Close()
+                      "$($ej.error.code): $($ej.error.message)" } catch { $ex.Message }
+            } else { $ex.Message }
+            throw $m
+        }
+    }
+
+    try {
+        # 1. Create service principal for the new app
+        $spRes = & $graphPost "https://graph.microsoft.com/v1.0/servicePrincipals" "{`"appId`":`"$newId`"}"
+        if ($spRes -eq 'conflict') {
+            # Already exists — look it up
+            $spRes = (& $graphGet "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId+eq+'$newId'&`$select=id").value[0]
+        }
+        $spId = $spRes.id
+
+        # 2. Resolve resource service principal IDs (Exchange Online + Microsoft Graph)
+        $exoSp = (& $graphGet "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId+eq+'00000002-0000-0ff1-ce00-000000000000'&`$select=id").value[0].id
+        $grSp  = (& $graphGet "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId+eq+'00000003-0000-0000-c000-000000000000'&`$select=id").value[0].id
+
+        # 3. Grant admin consent (AllPrincipals = tenant-wide)
+        foreach ($grant in @(
+            @{ Res=$exoSp; Scope='EWS.AccessAsUser.All' },
+            @{ Res=$grSp;  Scope='User.Read offline_access' }
+        )) {
+            $gBody = "{`"clientId`":`"$spId`",`"consentType`":`"AllPrincipals`",`"resourceId`":`"$($grant.Res)`",`"scope`":`"$($grant.Scope)`"}"
+            & $graphPost "https://graph.microsoft.com/v1.0/oauth2PermissionGrants" $gBody | Out-Null
+        }
+        $consentOk = $true
+    } catch {
+        $consentErr = $_.Exception.Message
+    }
+
+    $form.Cursor = [System.Windows.Forms.Cursors]::Default
+
     # ── Save config and update UI ─────────────────────────────────────────────
     try {
         [System.IO.File]::WriteAllText($script:configPath,
@@ -1498,9 +1580,20 @@ $btnCreateApp.Add_Click({
     }
 
     $txtClientId.Text = $newId
+
+    $summaryMsg = if ($consentOk) {
+        "App registration 'Exchange Tester' created successfully.`n`nClient ID:`n$newId`n`n" +
+        "API permissions granted with tenant-wide admin consent:`n" +
+        "  • EWS.AccessAsUser.All`n  • User.Read`n  • offline_access`n`n" +
+        "Saved to ExchangeTester.config."
+    } else {
+        "App registration 'Exchange Tester' created successfully.`n`nClient ID:`n$newId`n`n" +
+        "Saved to ExchangeTester.config.`n`n" +
+        "Note: admin consent could not be granted automatically:`n$consentErr`n`n" +
+        "Please grant consent manually in the Azure portal."
+    }
     [System.Windows.Forms.MessageBox]::Show(
-        "App registration 'Exchange Tester' created successfully.`n`nClient ID:`n$newId`n`nSaved to ExchangeTester.config.",
-        "App Registration Created",
+        $summaryMsg, "App Registration Created",
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
 })
