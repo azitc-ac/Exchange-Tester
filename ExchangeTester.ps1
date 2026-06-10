@@ -710,8 +710,8 @@ $chkUseCurrentUser.Add_CheckedChanged({
 })
 
 # Config file path (same directory as this script)
-$script:configPath = Join-Path (if ($PSScriptRoot) { $PSScriptRoot } else {
-    Split-Path $MyInvocation.MyCommand.Path }) "ExchangeTester.config"
+$_scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path $MyInvocation.MyCommand.Path }
+$script:configPath = Join-Path $_scriptDir "ExchangeTester.config"
 
 $btnCreateApp.Add_Click({
     $tenantId = $txtTenantId.Text.Trim()
