@@ -405,7 +405,7 @@ function ConvertFrom-AutodiscoverXml {
             & $add $grp "EWS URL"                 (& $txt $proto "ad:EwsUrl")
             & $add $grp "OAB URL"                 (& $txt $proto "ad:OABUrl")
             & $add $grp "OOF URL"                 (& $txt $proto "ad:OOFUrl")
-            & $add $grp "ActiveSync URL"          (& $txt $proto "ad:ASUrl")
+            & $add $grp "Availability Service URL" (& $txt $proto "ad:ASUrl")
             & $add $grp "EMWS URL"                (& $txt $proto "ad:EmwsUrl")
             & $add $grp "Public Folder Server"    (& $txt $proto "ad:PublicFolderServer")
             & $add $grp "Autodiscover Internal"   (& $txt $proto "ad:AutodiscoverServiceInternalUri")
@@ -439,20 +439,26 @@ function ConvertFrom-AutodiscoverXml {
 function Get-AutodiscoverUrls {
     param([string]$RawXml)
 
-    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $seen    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $results   = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $seen      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $mapiHosts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
     $addUrl = {
         param([string]$protoType, [string]$field, [string]$url)
         if (-not $url) { return }
         $url = $url.Trim()
         if ($url -notmatch '^https?://') { return }
+        # MAPI/HTTP AutoDiscover URLs carry ?MailboxId=… which causes 500 on a
+        # plain GET without MAPI headers; strip the query string for probing
+        if ($protoType -eq 'mapiHttp' -and $url -match '\?') {
+            $url = ($url -split '\?')[0]
+        }
         if ($seen.Add($url)) {
-            $results.Add([PSCustomObject]@{
-                Protocol = $protoType
-                Field    = $field
-                Url      = $url
-            })
+            $results.Add([PSCustomObject]@{ Protocol = $protoType; Field = $field; Url = $url })
+        }
+        # Track unique MAPI hosts so we can add /mapi/healthcheck.htm below
+        if ($protoType -eq 'mapiHttp' -and $url -match '^(https?://[^/]+)') {
+            [void]$mapiHosts.Add($Matches[1])
         }
     }
 
@@ -478,12 +484,20 @@ function Get-AutodiscoverUrls {
                 if ($n) { & $addUrl $protoType "OWA ($dir)" $n.InnerText }
             }
 
-            # mapiHttp: MailStore / AddressBook
+            # mapiHttp: MailStore / AddressBook (query string stripped inside $addUrl)
             foreach ($store in @("MailStore","AddressBook")) {
                 foreach ($uField in @("InternalUrl","ExternalUrl")) {
                     $n = $proto.SelectSingleNode("ad:$store/ad:$uField", $ns)
                     if ($n) { & $addUrl $protoType "$store.$uField" $n.InnerText }
                 }
+            }
+        }
+
+        # Health check for each unique MAPI/HTTP host
+        foreach ($h in $mapiHosts) {
+            $hcUrl = "$h/mapi/healthcheck.htm"
+            if ($seen.Add($hcUrl)) {
+                $results.Add([PSCustomObject]@{ Protocol = 'mapiHttp'; Field = 'Healthcheck'; Url = $hcUrl })
             }
         }
     } catch {}
