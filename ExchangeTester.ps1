@@ -703,10 +703,266 @@ $bgWorker.Add_RunWorkerCompleted({
 #==============================================================================
 
 $chkUseCurrentUser.Add_CheckedChanged({
-    $useExplicit       = -not $chkUseCurrentUser.Checked
-    $txtPass.Enabled   = $useExplicit
-    $lblPass.Enabled   = $useExplicit
-    if ($chkUseCurrentUser.Checked) { $txtPass.Clear() }
+    $useExplicit     = -not $chkUseCurrentUser.Checked
+    $lblPass.Enabled = $useExplicit
+    $txtPass.Enabled = $useExplicit
+    if (-not $useExplicit) { $txtPass.Clear() }
+})
+
+# Config file path (same directory as this script)
+$script:configPath = Join-Path (if ($PSScriptRoot) { $PSScriptRoot } else {
+    Split-Path $MyInvocation.MyCommand.Path }) "ExchangeTester.config"
+
+$btnCreateApp.Add_Click({
+    $tenantId = $txtTenantId.Text.Trim()
+    if (-not $tenantId) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please detect or enter the Tenant ID first.",
+            "Tenant ID Required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    # ── Auth Code Flow + PKCE via local HTTP listener ────────────────────────
+    $graphApp = '14d82eec-204b-4c2f-b7e8-296a70dab67e'   # Microsoft Graph Command Line Tools
+
+    # PKCE: 48-byte random verifier → SHA-256 → base64url challenge
+    $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+    $rngBytes = [byte[]]::new(48)
+    $rng.GetBytes($rngBytes); $rng.Dispose()
+    $verifier  = [Convert]::ToBase64String($rngBytes) -replace '\+','-' -replace '/','_' -replace '=',''
+    $sha256    = [System.Security.Cryptography.SHA256Managed]::new()
+    $chalBytes = $sha256.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($verifier)); $sha256.Dispose()
+    $challenge = [Convert]::ToBase64String($chalBytes) -replace '\+','-' -replace '/','_' -replace '=',''
+
+    # Find a free ephemeral port
+    $tcpT = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $tcpT.Start(); $freePort = $tcpT.LocalEndpoint.Port; $tcpT.Stop()
+
+    $redirectUri = "http://localhost:$freePort/"
+    $graphScope  = 'https://graph.microsoft.com/Application.ReadWrite.All ' +
+                   'https://graph.microsoft.com/AppRoleAssignment.ReadWrite.All ' +
+                   'https://graph.microsoft.com/Directory.ReadWrite.All ' +
+                   'https://graph.microsoft.com/Directory.AccessAsUser.All ' +
+                   'offline_access'
+    $stateVal    = [Guid]::NewGuid().ToString('N')
+    $authUrl     = "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenantId))/oauth2/v2.0/authorize" +
+        "?client_id=$([Uri]::EscapeDataString($graphApp))" +
+        "&response_type=code" +
+        "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
+        "&scope=$([Uri]::EscapeDataString($graphScope))" +
+        "&state=$([Uri]::EscapeDataString($stateVal))" +
+        "&code_challenge=$([Uri]::EscapeDataString($challenge))" +
+        "&code_challenge_method=S256" +
+        "&prompt=select_account"
+
+    # Synchronized hashtable for listener ↔ UI thread communication
+    $lsync = [hashtable]::Synchronized(@{ Code = $null; Err = $null; Cancel = $false; Done = $false })
+
+    # Background runspace: listens for the OAuth2 redirect callback
+    $lRs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $lRs.ApartmentState = [System.Threading.ApartmentState]::STA
+    $lRs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $lRs.Open()
+    $lRs.SessionStateProxy.SetVariable('lsync',    $lsync)
+    $lRs.SessionStateProxy.SetVariable('freePort', $freePort)
+    $lRs.SessionStateProxy.SetVariable('stateVal', $stateVal)
+
+    $lPs = [System.Management.Automation.PowerShell]::Create()
+    $lPs.Runspace = $lRs
+    [void]$lPs.AddScript({
+        $hl = [System.Net.HttpListener]::new()
+        $hl.Prefixes.Add("http://localhost:$freePort/")
+        $hl.Start()
+        try {
+            $ar       = $hl.BeginGetContext($null, $null)
+            $deadline = (Get-Date).AddMinutes(5)
+            while (-not $ar.IsCompleted -and (Get-Date) -lt $deadline) {
+                if ($lsync.Cancel) { $hl.Stop(); return }
+                [System.Threading.Thread]::Sleep(200)
+            }
+            if (-not $ar.IsCompleted) {
+                $hl.Stop()
+                if (-not $lsync.Cancel) { $lsync.Err = 'Sign-in timed out (5 min)' }
+                return
+            }
+            $ctx  = $hl.EndGetContext($ar)
+            $qs   = $ctx.Request.QueryString
+            $code = $qs['code']; $retState = $qs['state']
+            $oErr = $qs['error']; $oErrD = $qs['error_description']
+            $ok   = $code -and $retState -eq $stateVal
+            $html = if ($ok) {
+                '<html><body style="font-family:sans-serif;padding:40px"><h2 style="color:green">&#10003; Signed in successfully</h2><p>You may close this tab and return to Exchange Tester.</p></body></html>'
+            } else {
+                '<html><body style="font-family:sans-serif;padding:40px"><h2 style="color:red">&#10007; Sign-in failed or cancelled</h2><p>You may close this tab.</p></body></html>'
+            }
+            $hb = [System.Text.Encoding]::UTF8.GetBytes($html)
+            $ctx.Response.ContentType = 'text/html; charset=utf-8'
+            $ctx.Response.ContentLength64 = $hb.Length
+            $ctx.Response.OutputStream.Write($hb, 0, $hb.Length)
+            $ctx.Response.OutputStream.Close()
+            $ctx.Response.Close()
+            if ($ok)       { $lsync.Code = $code }
+            elseif ($oErr) { $lsync.Err  = if ($oErrD) { "${oErr}: $oErrD" } else { $oErr } }
+            else           { $lsync.Err  = 'No authorization code received' }
+        } catch {
+            if (-not $lsync.Cancel) { $lsync.Err = $_.Exception.Message }
+        } finally {
+            try { $hl.Stop(); $hl.Close() } catch {}
+            $lsync.Done = $true
+        }
+    })
+    [void]$lPs.BeginInvoke()
+
+    # Open the system browser at the auth URL
+    [System.Diagnostics.Process]::Start($authUrl) | Out-Null
+
+    # ── "Waiting for browser sign-in" dialog ───────────────────────────────────
+    $aForm = New-Object System.Windows.Forms.Form
+    $aForm.Text            = "Sign in  —  Create App Registration"
+    $aForm.Size            = New-Object System.Drawing.Size(520, 155)
+    $aForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $aForm.MinimizeBox     = $false
+    $aForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+
+    $aL0 = New-Object System.Windows.Forms.Label
+    $aL0.Text     = "Sign in as Application Administrator or Global Admin."
+    $aL0.Location = New-Object System.Drawing.Point(12, 12)
+    $aL0.Size     = New-Object System.Drawing.Size(490, 18)
+    $aL0.Font     = New-Object System.Drawing.Font($aForm.Font, [System.Drawing.FontStyle]::Bold)
+
+    $aWait = New-Object System.Windows.Forms.Label
+    $aWait.Text      = "The sign-in page has been opened in your browser. Waiting for authentication…"
+    $aWait.Location  = New-Object System.Drawing.Point(12, 38)
+    $aWait.Size      = New-Object System.Drawing.Size(490, 18)
+    $aWait.ForeColor = [System.Drawing.Color]::Gray
+
+    $aDots = New-Object System.Windows.Forms.Label
+    $aDots.Text      = ""
+    $aDots.Location  = New-Object System.Drawing.Point(12, 62)
+    $aDots.AutoSize  = $true
+    $aDots.ForeColor = [System.Drawing.Color]::SteelBlue
+
+    $aCancel = New-Object System.Windows.Forms.Button
+    $aCancel.Text     = "Cancel"
+    $aCancel.Location = New-Object System.Drawing.Point(430, 90)
+    $aCancel.Size     = New-Object System.Drawing.Size(72, 26)
+    $aCancel.Add_Click({ $lsync.Cancel = $true; $aForm.Close() })
+
+    $aForm.Controls.AddRange(@($aL0, $aWait, $aDots, $aCancel))
+
+    $aPoll = New-Object System.Windows.Forms.Timer; $aPoll.Interval = 300
+    $aPoll.Add_Tick({
+        if ($lsync.Done -or $lsync.Cancel) { $aForm.Close(); return }
+        $lsync.DotCount = (($lsync.DotCount + 1) % 6)
+        $aDots.Text = '.' * ($lsync.DotCount + 1)
+    })
+    $aForm.Add_Shown({ $lsync.DotCount = 0; $aPoll.Start() })
+    $aForm.Add_FormClosed({ $aPoll.Stop() })
+    [void]$aForm.ShowDialog()
+    $aPoll.Dispose(); $aForm.Dispose()
+
+    # Clean up listener runspace
+    try { $lPs.Stop() } catch {}
+    $lPs.Dispose(); $lRs.Close(); $lRs.Dispose()
+
+    if ($lsync.Cancel -or (-not $lsync.Code -and -not $lsync.Err)) { return }
+    if ($lsync.Err) {
+        [System.Windows.Forms.MessageBox]::Show("Sign-in error: $($lsync.Err)", "Auth Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    # ── Exchange authorization code for access token ───────────────────────────
+    $tokUrl   = "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenantId))/oauth2/v2.0/token"
+    $tokBody  = "grant_type=authorization_code" +
+        "&client_id=$([Uri]::EscapeDataString($graphApp))" +
+        "&code=$([Uri]::EscapeDataString($lsync.Code))" +
+        "&redirect_uri=$([Uri]::EscapeDataString($redirectUri))" +
+        "&code_verifier=$([Uri]::EscapeDataString($verifier))"
+    $tokBytes = [System.Text.Encoding]::UTF8.GetBytes($tokBody)
+    $adminToken = $null
+    try {
+        $rq2 = [System.Net.HttpWebRequest]::Create($tokUrl)
+        $rq2.Method = "POST"; $rq2.ContentType = "application/x-www-form-urlencoded"
+        $rq2.ContentLength = $tokBytes.Length; $rq2.Timeout = 15000
+        $ss2 = $rq2.GetRequestStream(); $ss2.Write($tokBytes, 0, $tokBytes.Length); $ss2.Close()
+        $rp2 = $rq2.GetResponse()
+        $tJ  = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp2.Close()
+        $adminToken = $tJ.access_token
+    } catch [System.Net.WebException] {
+        $exT = $_.Exception
+        $msg = if ($exT.Response) {
+            try { $ej=(New-Object System.IO.StreamReader($exT.Response.GetResponseStream())).ReadToEnd()|ConvertFrom-Json; $exT.Response.Close(); "$($ej.error): $($ej.error_description)" } catch { $exT.Message }
+        } else { $exT.Message }
+        [System.Windows.Forms.MessageBox]::Show("Token exchange failed: $msg", "Auth Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Token exchange failed: $($_.Exception.Message)", "Auth Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+    if (-not $adminToken) {
+        [System.Windows.Forms.MessageBox]::Show("Token exchange returned no access token.", "Auth Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    # ── Create app registration via Microsoft Graph ───────────────────────────
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $appBody  = '{"displayName":"Exchange Tester","isFallbackPublicClient":true}'
+    $appBytes = [System.Text.Encoding]::UTF8.GetBytes($appBody)
+    $newId    = $null
+    try {
+        $rq3 = [System.Net.HttpWebRequest]::Create("https://graph.microsoft.com/v1.0/applications")
+        $rq3.Method = "POST"; $rq3.ContentType = "application/json"
+        $rq3.ContentLength = $appBytes.Length; $rq3.Timeout = 20000
+        $rq3.Headers["Authorization"] = "Bearer $adminToken"
+        $ss3 = $rq3.GetRequestStream(); $ss3.Write($appBytes, 0, $appBytes.Length); $ss3.Close()
+        $rp3  = $rq3.GetResponse()
+        $aJ   = (New-Object System.IO.StreamReader($rp3.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp3.Close()
+        $newId = $aJ.appId
+    } catch [System.Net.WebException] {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        $exT3 = $_.Exception
+        $m3 = if ($exT3.Response) {
+            try { $e3=(New-Object System.IO.StreamReader($exT3.Response.GetResponseStream())).ReadToEnd()|ConvertFrom-Json; $exT3.Response.Close(); "$($e3.error.code): $($e3.error.message)" } catch { $exT3.Message }
+        } else { $exT3.Message }
+        [System.Windows.Forms.MessageBox]::Show($m3, "App Registration Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    } catch {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+    $form.Cursor = [System.Windows.Forms.Cursors]::Default
+
+    # ── Save config and update UI ─────────────────────────────────────────────
+    try {
+        [System.IO.File]::WriteAllText($script:configPath,
+            (ConvertTo-Json @{ ClientId = $newId }),
+            [System.Text.Encoding]::UTF8)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "App created but config could not be saved:`n$($_.Exception.Message)",
+            "Warning", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    }
+
+    $txtClientId.Text = $newId
+    [System.Windows.Forms.MessageBox]::Show(
+        "App registration 'Exchange Tester' created successfully.`n`nClient ID:`n$newId`n`nSaved to ExchangeTester.config.",
+        "App Registration Created",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
 })
 
 $btnTest.Add_Click({
