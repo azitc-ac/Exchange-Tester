@@ -446,10 +446,12 @@ function ConvertFrom-AutodiscoverXml {
 function Get-AutodiscoverUrls {
     param([string]$RawXml)
 
-    $results   = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $results  = [System.Collections.Generic.List[PSCustomObject]]::new()
     # key "protocol`n url" -> row object (so we can append field names)
-    $rowMap    = @{}
-    $mapiHosts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $rowMap   = @{}
+    $allHosts = [System.Collections.Generic.List[string]]::new()   # scheme://host, in order seen
+    $hostSeen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $segSeen  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
     $addUrl = {
         param([string]$protoType, [string]$field, [string]$url)
@@ -473,9 +475,10 @@ function Get-AutodiscoverUrls {
             $rowMap[$key] = $row
             $results.Add($row)
         }
-        # Track unique MAPI hosts so we can add /mapi/healthcheck.htm below
-        if ($protoType -eq 'mapiHttp' -and $url -match '^(https?://[^/]+)') {
-            [void]$mapiHosts.Add($Matches[1])
+        # Track host + first path segment (vdir) for the healthcheck basis test
+        if ($url -match '^(https?://[^/]+)(?:/([^/?#]+))?') {
+            if ($hostSeen.Add($Matches[1])) { $allHosts.Add($Matches[1]) }
+            if ($Matches[2]) { [void]$segSeen.Add($Matches[2]) }
         }
     }
 
@@ -510,14 +513,28 @@ function Get-AutodiscoverUrls {
             }
         }
 
-        # Health check for each unique MAPI/HTTP host
-        foreach ($h in $mapiHosts) {
-            $hcUrl = "$h/mapi/healthcheck.htm"
-            $key   = "mapiHttp`n$hcUrl"
-            if (-not $rowMap.ContainsKey($key)) {
-                $row = [PSCustomObject]@{ Protocol = 'mapiHttp'; Field = 'Healthcheck'; Url = $hcUrl }
-                $rowMap[$key] = $row
-                $results.Add($row)
+        # ── Healthcheck basis test ────────────────────────────────────────────
+        # Every Exchange IIS virtual directory exposes /<vdir>/healthcheck.htm
+        # (the page load balancers probe; returns HTTP 200 when the vdir's app
+        # pool is healthy). Build one healthcheck per host for the standard set
+        # of vdirs, plus any vdir actually seen in the AutoDiscover URLs.
+        $vdirs = [System.Collections.Specialized.OrderedDictionary]::new()  # lowercase -> canonical
+        foreach ($v in @('autodiscover','ews','oab','owa','ecp','mapi','rpc','Microsoft-Server-ActiveSync')) {
+            $vdirs[$v.ToLower()] = $v
+        }
+        foreach ($seg in $segSeen) {
+            $lc = $seg.ToLower()
+            if (-not $vdirs.Contains($lc)) { $vdirs[$lc] = $seg }
+        }
+        foreach ($h in $allHosts) {
+            foreach ($vd in $vdirs.Values) {
+                $hcUrl = "$h/$vd/healthcheck.htm"
+                $key   = "Health`n$hcUrl"
+                if (-not $rowMap.ContainsKey($key)) {
+                    $row = [PSCustomObject]@{ Protocol = 'Health'; Field = $vd; Url = $hcUrl }
+                    $rowMap[$key] = $row
+                    $results.Add($row)
+                }
             }
         }
     } catch {}
