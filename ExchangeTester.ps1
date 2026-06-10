@@ -2074,7 +2074,7 @@ $btnAddTests.Add_Click({
     [void]$lv.Columns.Add("URL",      430)
     [void]$lv.Columns.Add("Auth / Info", 195)
 
-    # Right-click: copy URL
+    # Right-click context menu: copy URL / copy all as CSV
     $ctxLv     = New-Object System.Windows.Forms.ContextMenuStrip
     $miCopyUrl = New-Object System.Windows.Forms.ToolStripMenuItem("Copy URL")
     [void]$ctxLv.Items.Add($miCopyUrl)
@@ -2083,14 +2083,62 @@ $btnAddTests.Add_Click({
             [System.Windows.Forms.Clipboard]::SetText($lv.SelectedItems[0].SubItems[3].Text)
         }
     })
+    [void]$ctxLv.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miCsvCtx = New-Object System.Windows.Forms.ToolStripMenuItem("Copy all as CSV")
+    [void]$ctxLv.Items.Add($miCsvCtx)
     $lv.ContextMenuStrip = $ctxLv
+
+    # CSV builder (shared by Copy and Save buttons)
+    $makeCsv = {
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine('"Protocol";"Field";"Status";"URL";"Auth / Info"')
+        foreach ($row in $lv.Items) {
+            $cols = @(
+                $row.Text,
+                $row.SubItems[1].Text,
+                $row.SubItems[2].Text,
+                $row.SubItems[3].Text,
+                $row.SubItems[4].Text
+            )
+            $line = ($cols | ForEach-Object { '"' + ($_ -replace '"','""') + '"' }) -join ';'
+            [void]$sb.AppendLine($line)
+        }
+        return $sb.ToString()
+    }
 
     $lblProg = New-Object System.Windows.Forms.Label
     $lblProg.Text      = "Connecting…"
     $lblProg.Location  = New-Object System.Drawing.Point(8, 457)
-    $lblProg.Size      = New-Object System.Drawing.Size(750, 18)
+    $lblProg.Size      = New-Object System.Drawing.Size(590, 18)
     $lblProg.Anchor    = ([System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Bottom)
     $lblProg.ForeColor = [System.Drawing.Color]::Gray
+
+    $btnSaveCsv = New-Object System.Windows.Forms.Button
+    $btnSaveCsv.Text     = "Save CSV…"
+    $btnSaveCsv.Location = New-Object System.Drawing.Point(688, 453)
+    $btnSaveCsv.Size     = New-Object System.Drawing.Size(80, 26)
+    $btnSaveCsv.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $btnSaveCsv.Add_Click({
+        $csv = & $makeCsv
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter   = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+        $sfd.FileName = "additional-tests.csv"
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            [System.IO.File]::WriteAllText($sfd.FileName, $csv, [System.Text.Encoding]::UTF8)
+        }
+    })
+
+    $btnCopyCsv = New-Object System.Windows.Forms.Button
+    $btnCopyCsv.Text     = "Copy CSV"
+    $btnCopyCsv.Location = New-Object System.Drawing.Point(776, 453)
+    $btnCopyCsv.Size     = New-Object System.Drawing.Size(80, 26)
+    $btnCopyCsv.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $btnCopyCsv.Add_Click({
+        $csv = & $makeCsv
+        [System.Windows.Forms.Clipboard]::SetText($csv)
+    })
+
+    $miCsvCtx.Add_Click({ $btnCopyCsv.PerformClick() })
 
     $btnDlgClose = New-Object System.Windows.Forms.Button
     $btnDlgClose.Text     = "Close"
@@ -2100,7 +2148,7 @@ $btnAddTests.Add_Click({
     $btnDlgClose.Add_Click({ $dlg.Close() })
     $dlg.CancelButton = $btnDlgClose
 
-    $dlg.Controls.AddRange(@($lv, $lblProg, $btnDlgClose))
+    $dlg.Controls.AddRange(@($lv, $lblProg, $btnSaveCsv, $btnCopyCsv, $btnDlgClose))
 
     # Pre-populate rows with placeholder status
     $lvItems = @{}
