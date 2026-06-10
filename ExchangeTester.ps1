@@ -69,59 +69,153 @@ $txtPass.TabIndex     = 1
 $form.Controls.Add($txtPass)
 #endregion
 
-#region --- Row 3: Checkboxes ---
-$chkWinAuth = New-Object System.Windows.Forms.CheckBox
-$chkWinAuth.Text      = "Use AutoDiscover"
-$chkWinAuth.Location  = New-Object System.Drawing.Point(8, 70)
-$chkWinAuth.Size      = New-Object System.Drawing.Size(155, 20)
-$chkWinAuth.Checked   = $true
-$chkWinAuth.TabIndex  = 2
-$form.Controls.Add($chkWinAuth)
+#region --- Auth mode (top-level radio buttons) ---
+$radModernAuth = New-Object System.Windows.Forms.RadioButton
+$radModernAuth.Text     = "Modern Auth (OAuth2)"
+$radModernAuth.Location = New-Object System.Drawing.Point(8, 65)
+$radModernAuth.Size     = New-Object System.Drawing.Size(185, 20)
+$radModernAuth.Checked  = $true
+$radModernAuth.TabIndex = 2
+$form.Controls.Add($radModernAuth)
 
-$chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
-$chkUseCurrentUser.Text     = "Use logged-in user (Windows Auth)"
-$chkUseCurrentUser.Location = New-Object System.Drawing.Point(172, 70)
-$chkUseCurrentUser.Size     = New-Object System.Drawing.Size(240, 20)
-$chkUseCurrentUser.Checked  = $true
-$chkUseCurrentUser.TabIndex = 3
-$form.Controls.Add($chkUseCurrentUser)
-
-$chkIgnoreCert = New-Object System.Windows.Forms.CheckBox
-$chkIgnoreCert.Text     = "Ignore certificate errors"
-$chkIgnoreCert.Location = New-Object System.Drawing.Point(420, 70)
-$chkIgnoreCert.Size     = New-Object System.Drawing.Size(195, 20)
-$chkIgnoreCert.Checked  = $false
-$chkIgnoreCert.TabIndex = 4
-$form.Controls.Add($chkIgnoreCert)
+$radWIA = New-Object System.Windows.Forms.RadioButton
+$radWIA.Text     = "Windows Integrated Auth"
+$radWIA.Location = New-Object System.Drawing.Point(390, 65)
+$radWIA.Size     = New-Object System.Drawing.Size(205, 20)
+$radWIA.Checked  = $false
+$radWIA.TabIndex = 3
+$form.Controls.Add($radWIA)
 #endregion
 
 #region --- Buttons (top-right) ---
 $btnTest = New-Object System.Windows.Forms.Button
 $btnTest.Text     = "Test"
-$btnTest.Location = New-Object System.Drawing.Point(620, 64)
+$btnTest.Location = New-Object System.Drawing.Point(620, 62)
 $btnTest.Size     = New-Object System.Drawing.Size(68, 26)
-$btnTest.TabIndex = 5
+$btnTest.TabIndex = 9
 $form.Controls.Add($btnTest)
 $form.AcceptButton = $btnTest
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text     = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(696, 64)
+$btnCancel.Location = New-Object System.Drawing.Point(696, 62)
 $btnCancel.Size     = New-Object System.Drawing.Size(68, 26)
 $btnCancel.Enabled  = $false
-$btnCancel.TabIndex = 6
+$btnCancel.TabIndex = 10
 $form.Controls.Add($btnCancel)
 #endregion
 
-#region --- Separator + Progress bar ---
+#region --- Modern Auth sub-options (Panel keeps radDCF/radACF exclusive with each other only) ---
+$pnlModernSub = New-Object System.Windows.Forms.Panel
+$pnlModernSub.Location = New-Object System.Drawing.Point(22, 89)
+$pnlModernSub.Size     = New-Object System.Drawing.Size(358, 42)
+$form.Controls.Add($pnlModernSub)
+
+$radDCF = New-Object System.Windows.Forms.RadioButton
+$radDCF.Text     = "Public Office app and Device Code Flow"
+$radDCF.Location = New-Object System.Drawing.Point(2, 1)
+$radDCF.Size     = New-Object System.Drawing.Size(354, 18)
+$radDCF.Checked  = $true
+$radDCF.TabIndex = 0
+$pnlModernSub.Controls.Add($radDCF)
+
+$radACF = New-Object System.Windows.Forms.RadioButton
+$radACF.Text     = "Own 'Exchange Tester' app and Auth Code Flow"
+$radACF.Location = New-Object System.Drawing.Point(2, 22)
+$radACF.Size     = New-Object System.Drawing.Size(354, 18)
+$radACF.Checked  = $false
+$radACF.TabIndex = 1
+$pnlModernSub.Controls.Add($radACF)
+#endregion
+
+#region --- WIA sub-option ---
+$chkUseCurrentUser = New-Object System.Windows.Forms.CheckBox
+$chkUseCurrentUser.Text     = "Use logged-in user"
+$chkUseCurrentUser.Location = New-Object System.Drawing.Point(408, 91)
+$chkUseCurrentUser.Size     = New-Object System.Drawing.Size(175, 20)
+$chkUseCurrentUser.Checked  = $true
+$chkUseCurrentUser.Enabled  = $false
+$chkUseCurrentUser.TabIndex = 4
+$form.Controls.Add($chkUseCurrentUser)
+#endregion
+
+#region --- Standalone options ---
+$chkIgnoreCert = New-Object System.Windows.Forms.CheckBox
+$chkIgnoreCert.Text     = "Ignore certificate errors"
+$chkIgnoreCert.Location = New-Object System.Drawing.Point(8, 133)
+$chkIgnoreCert.Size     = New-Object System.Drawing.Size(200, 20)
+$chkIgnoreCert.Checked  = $false
+$chkIgnoreCert.TabIndex = 5
+$form.Controls.Add($chkIgnoreCert)
+
+$chkUseSCP = New-Object System.Windows.Forms.CheckBox
+$chkUseSCP.Text     = "Use SCP (domain-joined)"
+$chkUseSCP.Location = New-Object System.Drawing.Point(390, 133)
+$chkUseSCP.Size     = New-Object System.Drawing.Size(200, 20)
+$chkUseSCP.Checked  = $false
+$chkUseSCP.TabIndex = 6
+$form.Controls.Add($chkUseSCP)
+#endregion
+
+#region --- ACF fields: Client ID + Tenant ID (shown only when ACF selected) ---
+$lblClientId = New-Object System.Windows.Forms.Label
+$lblClientId.Text      = "Client ID:"
+$lblClientId.Location  = New-Object System.Drawing.Point(22, 135)
+$lblClientId.Size      = New-Object System.Drawing.Size(100, 20)
+$lblClientId.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$lblClientId.Visible   = $false
+$form.Controls.Add($lblClientId)
+
+$txtClientId = New-Object System.Windows.Forms.TextBox
+$txtClientId.Location  = New-Object System.Drawing.Point(126, 133)
+$txtClientId.Size      = New-Object System.Drawing.Size(356, 22)
+$txtClientId.Text      = ''
+$txtClientId.Visible   = $false
+$txtClientId.TabIndex  = 7
+$txtClientId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
+$form.Controls.Add($txtClientId)
+
+$btnCreateApp = New-Object System.Windows.Forms.Button
+$btnCreateApp.Text     = "Register App"
+$btnCreateApp.Location = New-Object System.Drawing.Point(486, 133)
+$btnCreateApp.Size     = New-Object System.Drawing.Size(100, 22)
+$btnCreateApp.Visible  = $false
+$btnCreateApp.TabIndex = 99
+$form.Controls.Add($btnCreateApp)
+
+$lblTenantId = New-Object System.Windows.Forms.Label
+$lblTenantId.Text      = "Tenant ID:"
+$lblTenantId.Location  = New-Object System.Drawing.Point(22, 159)
+$lblTenantId.Size      = New-Object System.Drawing.Size(100, 20)
+$lblTenantId.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$lblTenantId.Visible   = $false
+$form.Controls.Add($lblTenantId)
+
+$txtTenantId = New-Object System.Windows.Forms.TextBox
+$txtTenantId.Location  = New-Object System.Drawing.Point(126, 157)
+$txtTenantId.Size      = New-Object System.Drawing.Size(460, 22)
+$txtTenantId.Text      = ''
+$txtTenantId.Visible   = $false
+$txtTenantId.TabIndex  = 8
+$txtTenantId.Font      = New-Object System.Drawing.Font("Consolas", 8.5)
+$form.Controls.Add($txtTenantId)
+
+$toolTip = New-Object System.Windows.Forms.ToolTip
+$toolTip.SetToolTip($lblClientId, "Application (client) ID of your 'Exchange Tester' app registration in Azure AD.")
+$toolTip.SetToolTip($txtClientId, "Application (client) ID of your 'Exchange Tester' app registration in Azure AD.")
+$toolTip.SetToolTip($lblTenantId, "Directory (tenant) ID — GUID or domain, e.g. contoso.onmicrosoft.com.")
+$toolTip.SetToolTip($txtTenantId, "Directory (tenant) ID — GUID or domain, e.g. contoso.onmicrosoft.com.")
+#endregion
+
+#region --- Separator + Progress bar (y adjusted dynamically by Update-Layout) ---
 $pnlSep = New-Object System.Windows.Forms.Panel
-$pnlSep.Location  = New-Object System.Drawing.Point(0, 96)
+$pnlSep.Location  = New-Object System.Drawing.Point(0, 156)
 $pnlSep.Size      = New-Object System.Drawing.Size(775, 2)
 $pnlSep.BackColor = [System.Drawing.SystemColors]::ControlDark
 $form.Controls.Add($pnlSep)
 
 $prgBar = New-Object System.Windows.Forms.ProgressBar
-$prgBar.Location = New-Object System.Drawing.Point(8, 104)
+$prgBar.Location = New-Object System.Drawing.Point(8, 164)
 $prgBar.Size     = New-Object System.Drawing.Size(757, 14)
 $prgBar.Minimum  = 0
 $prgBar.Maximum  = 100
@@ -131,8 +225,8 @@ $form.Controls.Add($prgBar)
 
 #region --- TabControl ---
 $tabCtrl = New-Object System.Windows.Forms.TabControl
-$tabCtrl.Location = New-Object System.Drawing.Point(8, 124)
-$tabCtrl.Size     = New-Object System.Drawing.Size(757, 462)
+$tabCtrl.Location = New-Object System.Drawing.Point(8, 183)
+$tabCtrl.Size     = New-Object System.Drawing.Size(757, 403)
 $form.Controls.Add($tabCtrl)
 
 # Tab: Results
@@ -324,61 +418,47 @@ function ConvertFrom-AutodiscoverXml {
 }
 
 #endregion ===================================================================
-#  BACKGROUND WORKER
+#  TEST ENGINE  (PowerShell Runspace + WinForms Timer — avoids ThreadPool runspace issue)
 #==============================================================================
 
-# Capture the main runspace so script blocks can be invoked on the ThreadPool thread
-$script:MainRunspace = [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace
+# Script-level state for the currently running test
+$script:CurrentPS      = $null
+$script:CurrentRS      = $null
+$script:CurrentSync    = $null
+$script:PollTimer      = $null
 
-$bgWorker = New-Object System.ComponentModel.BackgroundWorker
-$bgWorker.WorkerReportsProgress     = $true
-$bgWorker.WorkerSupportsCancellation = $true
+# The actual test logic runs inside a dedicated PS runspace.
+# $sync is the only bridge between the runspace and the UI thread.
+$script:TestScript = {
+    param($sync)
 
-$bgWorker.Add_DoWork({
-    param($bwSender, $bwArgs)
-
-    # Make PowerShell script block invocations work on this ThreadPool thread
-    [System.Management.Automation.Runspaces.Runspace]::DefaultRunspace = $script:MainRunspace
-
-    $a          = $bwArgs.Argument
-    $email      = $a.Email
-    $password   = $a.Password
-    $useWinAuth = $a.UseWindowsAuth
+    $email      = $sync.Email
+    $password   = $sync.Password
+    $useWinAuth = $sync.UseWindowsAuth
     $domain     = ($email -split '@')[1]
 
-    # Explicit credentials (Basic / NTLM with supplied password)
+    # Credentials
     $netCred = $null
     if (-not $useWinAuth -and $password -ne '') {
         $netCred = New-Object System.Net.NetworkCredential($email, $password)
     }
 
     # AutoDiscover POST body
-    $bodyXml = @"
-<?xml version="1.0" encoding="utf-8"?>
-<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
-  <Request>
-    <EMailAddress>$email</EMailAddress>
-    <AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>
-  </Request>
-</Autodiscover>
-"@
+    $bodyXml = "<?xml version=""1.0"" encoding=""utf-8""?>" +
+        "<Autodiscover xmlns=""http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006"">" +
+        "<Request><EMailAddress>$email</EMailAddress>" +
+        "<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>" +
+        "</Request></Autodiscover>"
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyXml)
 
-    #region --- helpers (script blocks, capture outer scope via PS scope chain) ---
+    # Helpers — all run inside the dedicated runspace, no closure issues
+    $logLine = { param([string]$msg) $sync.Queue.Enqueue($msg) }
+    $setPct  = { param([int]$pct)   $sync.Pct = $pct }
 
-    $logLine = {
-        param([string]$msg)
-        $bwSender.ReportProgress(0, [PSCustomObject]@{ Type = 'Log'; Text = $msg })
-    }
-
-    $setPct = {
-        param([int]$pct)
-        $bwSender.ReportProgress($pct, [PSCustomObject]@{ Type = 'Pct' })
-    }
-
-    # HTTP POST → @{Code; Body; Location; Error}
+    # HTTP POST → @{Code; Body; Location; WwwAuth; Error}
+    # Pass $authHeader to override credentials with an explicit Authorization value (e.g. Bearer token)
     $doPost = {
-        param([string]$url)
+        param([string]$url, [string]$authHeader = '')
         try {
             $req = [System.Net.HttpWebRequest]::Create($url)
             $req.Method            = "POST"
@@ -387,7 +467,9 @@ $bgWorker.Add_DoWork({
             $req.AllowAutoRedirect = $false
             $req.Timeout           = 30000
             $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
-            if ($useWinAuth) {
+            if ($authHeader -ne '') {
+                $req.Headers["Authorization"] = $authHeader
+            } elseif ($useWinAuth) {
                 $req.UseDefaultCredentials = $true
             } elseif ($netCred) {
                 $req.Credentials = $netCred
@@ -406,19 +488,21 @@ $bgWorker.Add_DoWork({
                     $rdr.Close()
                 }
                 $resp.Close()
-                return @{ Code = $code; Body = $body; Location = $null; Error = $null }
+                return @{ Code = $code; Body = $body; Location = $null; WwwAuth = $null; Error = $null }
             } catch [System.Net.WebException] {
                 $ex = $_.Exception
                 if ($ex.Response) {
-                    $code = [int]$ex.Response.StatusCode
-                    $loc  = $ex.Response.Headers["Location"]
+                    $code    = [int]$ex.Response.StatusCode
+                    $loc          = $ex.Response.Headers["Location"]
+                    $wwwAuthVals  = try { $ex.Response.Headers.GetValues("WWW-Authenticate") } catch { $null }
+                    $wwwAuth      = if ($wwwAuthVals) { $wwwAuthVals -join ' ' } else { $null }
                     $ex.Response.Close()
-                    return @{ Code = $code; Body = $null; Location = $loc; Error = $null }
+                    return @{ Code = $code; Body = $null; Location = $loc; WwwAuth = $wwwAuth; Error = $null }
                 }
-                return @{ Code = -1; Body = $null; Location = $null; Error = $ex.Message }
+                return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $ex.Message }
             }
         } catch {
-            return @{ Code = -1; Body = $null; Location = $null; Error = $_.Exception.Message }
+            return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $_.Exception.Message }
         }
     }
 
@@ -450,6 +534,178 @@ $bgWorker.Add_DoWork({
         } catch {
             return @{ Code = -1; Location = $null; Error = $_.Exception.Message }
         }
+    }
+
+    $tryModernAuth = $sync.ModernAuth
+    $useSCP        = $sync.UseSCP
+
+    # Device Code Flow — no redirect URI registration needed.
+    # Shows a short code; user signs in via any browser at microsoft.com/devicelogin.
+    $getToken = {
+        param([string]$wwwAuthHeader)
+
+        $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
+        if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
+            $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
+        }
+        $deviceCodeUrl = $authUri -replace '/authorize', '/devicecode'
+        $tokenUrl      = $authUri -replace '/authorize', '/token'
+        $clientId      = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
+        $scope         = 'https://outlook.office365.com/.default offline_access'
+
+        & $logLine "Modern Auth: requesting device code…"
+
+        # Step 1 — get device code
+        $dcBytes = [System.Text.Encoding]::UTF8.GetBytes(
+            "client_id=$([Uri]::EscapeDataString($clientId))&scope=$([Uri]::EscapeDataString($scope))")
+        $dcJson = $null
+        try {
+            $rq = [System.Net.HttpWebRequest]::Create($deviceCodeUrl)
+            $rq.Method        = "POST"
+            $rq.ContentType   = "application/x-www-form-urlencoded"
+            $rq.ContentLength = $dcBytes.Length
+            $rq.Timeout       = 15000
+            $ss = $rq.GetRequestStream(); $ss.Write($dcBytes, 0, $dcBytes.Length); $ss.Close()
+            $rp = $rq.GetResponse()
+            $dcJson = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+            $rp.Close()
+        } catch [System.Net.WebException] {
+            $exT = $_.Exception
+            if ($exT.Response) {
+                try {
+                    $ej = (New-Object System.IO.StreamReader($exT.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $exT.Response.Close()
+                    & $logLine "Modern Auth: device code request failed — $($ej.error): $($ej.error_description)"
+                } catch { & $logLine "Modern Auth: device code request failed — $($exT.Message)" }
+            } else { & $logLine "Modern Auth: device code request failed — $($exT.Message)" }
+            return $null
+        } catch {
+            & $logLine "Modern Auth: device code request error — $($_.Exception.Message)"
+            return $null
+        }
+
+        $userCode   = $dcJson.user_code
+        $deviceCode = $dcJson.device_code
+        $verifyUri  = if ($dcJson.verification_uri) { $dcJson.verification_uri } else { $dcJson.verification_url }
+        $pollSec    = [int]$dcJson.interval; if ($pollSec -lt 5) { $pollSec = 5 }
+
+        & $logLine "Modern Auth: visit $verifyUri — enter code: $userCode"
+
+        $sync.DeviceToken  = $null
+        $sync.DeviceError  = $null
+        $sync.DeviceCancel = $false
+
+        # Step 2 — show dialog with code while polling
+        $dcForm = New-Object System.Windows.Forms.Form
+        $dcForm.Text            = "Sign in to Microsoft"
+        $dcForm.Size            = New-Object System.Drawing.Size(440, 210)
+        $dcForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+        $dcForm.MinimizeBox     = $false
+        $dcForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+
+        $lbl1 = New-Object System.Windows.Forms.Label
+        $lbl1.Text     = "1.  Open a browser and go to:"
+        $lbl1.Location = New-Object System.Drawing.Point(12, 14)
+        $lbl1.AutoSize = $true
+
+        $lnk = New-Object System.Windows.Forms.LinkLabel
+        $lnk.Text     = $verifyUri
+        $lnk.Location = New-Object System.Drawing.Point(28, 34)
+        $lnk.AutoSize = $true
+        $lnk.Add_LinkClicked({ [System.Diagnostics.Process]::Start($lnk.Text) })
+
+        $lbl2 = New-Object System.Windows.Forms.Label
+        $lbl2.Text     = "2.  Enter this code:"
+        $lbl2.Location = New-Object System.Drawing.Point(12, 62)
+        $lbl2.AutoSize = $true
+
+        $lblCode = New-Object System.Windows.Forms.Label
+        $lblCode.Text      = $userCode
+        $lblCode.Font      = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold)
+        $lblCode.Location  = New-Object System.Drawing.Point(28, 80)
+        $lblCode.AutoSize  = $true
+        $lblCode.ForeColor = [System.Drawing.Color]::DarkBlue
+
+        $btnCopy = New-Object System.Windows.Forms.Button
+        $btnCopy.Text     = "Copy"
+        $btnCopy.Location = New-Object System.Drawing.Point(340, 82)
+        $btnCopy.Size     = New-Object System.Drawing.Size(72, 26)
+        $btnCopy.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($userCode) })
+
+        $lblWait = New-Object System.Windows.Forms.Label
+        $lblWait.Text      = "Waiting for sign-in…"
+        $lblWait.Location  = New-Object System.Drawing.Point(12, 144)
+        $lblWait.AutoSize  = $true
+        $lblWait.ForeColor = [System.Drawing.Color]::Gray
+
+        $btnCancelDC = New-Object System.Windows.Forms.Button
+        $btnCancelDC.Text     = "Cancel"
+        $btnCancelDC.Location = New-Object System.Drawing.Point(340, 140)
+        $btnCancelDC.Size     = New-Object System.Drawing.Size(72, 26)
+        $btnCancelDC.Add_Click({ $sync.DeviceCancel = $true; $dcForm.Close() })
+
+        $dcForm.Controls.AddRange(@($lbl1, $lnk, $lbl2, $lblCode, $btnCopy, $lblWait, $btnCancelDC))
+
+        # Poll token endpoint on a timer; runs on UI thread so keep HTTP timeout short
+        $pollTimer = New-Object System.Windows.Forms.Timer
+        $pollTimer.Interval = $pollSec * 1000
+        $pollTimer.Add_Tick({
+            if ($sync.DeviceToken -or $sync.DeviceError -or $sync.DeviceCancel) { return }
+            $pb = [System.Text.Encoding]::UTF8.GetBytes(
+                "grant_type=urn:ietf:params:oauth:grant-type:device_code" +
+                "&client_id=$([Uri]::EscapeDataString($clientId))" +
+                "&device_code=$([Uri]::EscapeDataString($deviceCode))")
+            try {
+                $rq2 = [System.Net.HttpWebRequest]::Create($tokenUrl)
+                $rq2.Method        = "POST"
+                $rq2.ContentType   = "application/x-www-form-urlencoded"
+                $rq2.ContentLength = $pb.Length
+                $rq2.Timeout       = 4000
+                $ss2 = $rq2.GetRequestStream(); $ss2.Write($pb, 0, $pb.Length); $ss2.Close()
+                try {
+                    $rp2  = $rq2.GetResponse()
+                    $tokJ = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                    $rp2.Close()
+                    if ($tokJ.access_token) {
+                        $sync.DeviceToken = "Bearer $($tokJ.access_token)"
+                        $dcForm.Close()
+                    }
+                } catch [System.Net.WebException] {
+                    $ex2 = $_.Exception
+                    if ($ex2.Response) {
+                        $ej2 = (New-Object System.IO.StreamReader($ex2.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                        $ex2.Response.Close()
+                        switch ($ej2.error) {
+                            'authorization_pending' {}
+                            'slow_down'             { $pollTimer.Interval += 5000 }
+                            default {
+                                $sync.DeviceError = "$($ej2.error): $($ej2.error_description)"
+                                $dcForm.Close()
+                            }
+                        }
+                    }
+                }
+            } catch {}
+        })
+
+        $dcForm.Add_Shown({ $pollTimer.Start() })
+        $dcForm.Add_FormClosed({ $pollTimer.Stop() })
+        [void]$dcForm.ShowDialog()
+        $pollTimer.Dispose()
+        $dcForm.Dispose()
+
+        if ($sync.DeviceCancel -or (-not $sync.DeviceToken -and -not $sync.DeviceError)) {
+            & $logLine "Modern Auth: sign-in cancelled."
+            return $null
+        }
+        if ($sync.DeviceError) {
+            & $logLine "Modern Auth: sign-in error — $($sync.DeviceError)"
+            $sync.DeviceError = $null
+            return $null
+        }
+        & $logLine "Modern Auth: access token acquired."
+        $tok = $sync.DeviceToken; $sync.DeviceToken = $null
+        return $tok
     }
 
     # Try one AutoDiscover POST URL; returns XML string on 200, $null otherwise
@@ -496,6 +752,33 @@ $bgWorker.Add_DoWork({
         }
 
         if ($res.Code -eq 401) {
+            if ($res.WwwAuth) {
+                & $logLine "  WWW-Authenticate: $($res.WwwAuth)"
+            } else {
+                & $logLine "  WWW-Authenticate: (not present)"
+            }
+            $hasBearerChallenge = $res.WwwAuth -and $res.WwwAuth -match 'Bearer'
+            $isO365Endpoint     = $url -match 'outlook\.office365\.com'
+            if ($tryModernAuth -and ($hasBearerChallenge -or $isO365Endpoint)) {
+                if ($isO365Endpoint -and -not $hasBearerChallenge) {
+                    & $logLine "  O365 endpoint detected — attempting Modern Auth proactively (Bearer not advertised)."
+                }
+                & $logLine "Modern Auth: initiating OAuth2 Authorization Code Flow…"
+                $token = & $getToken $res.WwwAuth
+                if ($token) {
+                    & $logLine "Retrying AutoDiscover with Bearer token."
+                    $res2 = & $doPost $url $token
+                    if ($res2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res2.Code)." }
+                    if ($res2.Code -eq 200) {
+                        & $logLine "AutoDiscover via $url succeeded (Modern Auth)."
+                        return $res2.Body
+                    }
+                    & $logLine "AutoDiscover via $url failed after Modern Auth (httpStatus=$($res2.Code))."
+                    return $null
+                }
+            } elseif ($tryModernAuth) {
+                & $logLine "  No Bearer challenge — HMA/OAuth2 not offered by this endpoint."
+            }
             & $logLine "AutoDiscover via $url failed (0x800C820E)."
             return $null
         }
@@ -508,33 +791,27 @@ $bgWorker.Add_DoWork({
 
     $foundXml = $null
 
-    # --- Step 1: O365 ---
-    & $setPct 10
-    if (-not $bwSender.CancellationPending) {
-        $foundXml = & $tryUrl "https://outlook.office365.com/autodiscover/autodiscover.xml"
-    }
-
-    # --- Step 2: https://<domain>/autodiscover/autodiscover.xml ---
-    & $setPct 30
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
-        $foundXml = & $tryUrl "https://$domain/autodiscover/autodiscover.xml"
-    }
-
-    # --- Step 3: https://autodiscover.<domain>/autodiscover/autodiscover.xml ---
-    & $setPct 50
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
-        $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
-    }
-
-    # --- Step 4: SCP (Active Directory Service Connection Point) ---
-    & $setPct 65
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
-        & $logLine "Local AutoDiscover for $domain starting."
+    # --- Step 1: SCP — runs first when "Use SCP" is checked (domain-joined priority) ---
+    & $setPct 5
+    if (-not $sync.Cancel -and $useSCP) {
+        & $logLine "Local AutoDiscover for $domain starting (SCP)."
         try {
-            $searcher = New-Object System.DirectoryServices.DirectorySearcher
-            $searcher.Filter = "(&(objectClass=serviceConnectionPoint)(|(serviceBindingInformation=*autodiscover*)(keywords=67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68)))"
+            # Exchange AutoDiscover SCPs are stored in the Configuration partition,
+            # not the default domain partition — must set search root explicitly.
+            $rootDSE    = New-Object System.DirectoryServices.DirectoryEntry("LDAP://RootDSE")
+            $configNC   = $rootDSE.Properties["configurationNamingContext"].Value
+            & $logLine "  SCP search root: $configNC"
+            $searchRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$configNC")
+
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher($searchRoot)
+            # Match on the Exchange AutoDiscover GUID keyword (with or without braces)
+            # OR on serviceBindingInformation containing "autodiscover" as a fallback.
+            $searcher.Filter      = "(&(objectClass=serviceConnectionPoint)(|(serviceBindingInformation=*autodiscover*)(keywords=67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68)(keywords={67661d7F-8FC4-4fa7-BFAC-E1D7794C1F68})))"
+            $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
             [void]$searcher.PropertiesToLoad.Add("serviceBindingInformation")
+
             $scpHits = $searcher.FindAll()
+            & $logLine "  SCP records found: $($scpHits.Count)"
             if ($scpHits.Count -eq 0) {
                 & $logLine "Local AutoDiscover for $domain failed (0x8004010F)."
             } else {
@@ -552,13 +829,31 @@ $bgWorker.Add_DoWork({
                 if (-not $foundXml) { & $logLine "Local AutoDiscover for $domain failed." }
             }
         } catch {
-            & $logLine "Local AutoDiscover for $domain failed (0x8004010F)."
+            & $logLine "Local AutoDiscover for $domain failed (0x8004010F): $($_.Exception.Message)"
         }
     }
 
+    # --- Step 2: O365 ---
+    & $setPct 20
+    if (-not $foundXml -and -not $sync.Cancel) {
+        $foundXml = & $tryUrl "https://outlook.office365.com/autodiscover/autodiscover.xml"
+    }
+
+    # --- Step 3: https://<domain>/autodiscover/autodiscover.xml ---
+    & $setPct 40
+    if (-not $foundXml -and -not $sync.Cancel) {
+        $foundXml = & $tryUrl "https://$domain/autodiscover/autodiscover.xml"
+    }
+
+    # --- Step 4: https://autodiscover.<domain>/autodiscover/autodiscover.xml ---
+    & $setPct 58
+    if (-not $foundXml -and -not $sync.Cancel) {
+        $foundXml = & $tryUrl "https://autodiscover.$domain/autodiscover/autodiscover.xml"
+    }
+
     # --- Step 5: HTTP redirect check (well-known URL) ---
-    & $setPct 78
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    & $setPct 74
+    if (-not $foundXml -and -not $sync.Cancel) {
         $rdUrl = "http://autodiscover.$domain/autodiscover/autodiscover.xml"
         & $logLine "Redirect check for $rdUrl starting."
         $res = & $doGet $rdUrl
@@ -579,8 +874,8 @@ $bgWorker.Add_DoWork({
     }
 
     # --- Step 6: DNS SRV _autodiscover._tcp.<domain> ---
-    & $setPct 90
-    if (-not $foundXml -and -not $bwSender.CancellationPending) {
+    & $setPct 88
+    if (-not $foundXml -and -not $sync.Cancel) {
         & $logLine "DNS SRV lookup for $domain starting."
         try {
             $srvRecs = Resolve-DnsName -Name "_autodiscover._tcp.$domain" -Type SRV -ErrorAction Stop
@@ -606,50 +901,36 @@ $bgWorker.Add_DoWork({
         }
     }
 
-    if ($bwSender.CancellationPending) { $bwArgs.Cancel = $true; return }
+    if ($sync.Cancel) { $sync.Done = $true; return }
 
     & $setPct 100
-    $bwArgs.Result = [PSCustomObject]@{
-        Xml     = $foundXml
-        Success = ($null -ne $foundXml)
-    }
-})
+    $sync.Xml  = $foundXml
+    $sync.Done = $true
+}
 
-$bgWorker.Add_ProgressChanged({
-    param($sender, $e)
-    $state = $e.UserState
-    if ($state.Type -eq 'Log') {
-        $rtbLog.AppendText("$($state.Text)`r`n")
-        $rtbLog.ScrollToCaret()
-    } elseif ($state.Type -eq 'Pct') {
-        $v = $e.ProgressPercentage
-        if ($v -ge 0 -and $v -le 100) { $prgBar.Value = $v }
-    }
-})
+# Called from the poll timer when $sync.Done becomes $true
+function Complete-Test {
+    $script:PollTimer.Stop()
 
-$bgWorker.Add_RunWorkerCompleted({
-    param($sender, $e)
+    # Drain any remaining log lines
+    $msg = $null
+    while ($script:CurrentSync.Queue.TryDequeue([ref]$msg)) {
+        $rtbLog.AppendText("$msg`r`n")
+    }
+
     $btnTest.Enabled   = $true
     $btnCancel.Enabled = $false
 
-    if ($e.Cancelled) {
+    if ($script:CurrentSync.Cancel) {
         $form.Text = "Test E-Mail AutoConfiguration"
         $rtbLog.AppendText("`r`nTest cancelled.`r`n")
-        return
-    }
-    if ($e.Error) {
-        $form.Text = "Test E-Mail AutoConfiguration  —  Error"
-        $rtbLog.AppendText("`r`nUnhandled error: $($e.Error.Message)`r`n")
-        return
-    }
+    } elseif ($script:CurrentSync.Xml) {
+        $xml = $script:CurrentSync.Xml
 
-    $res = $e.Result
-
-    if ($res.Xml) {
-        # --- XML tab: pretty-print ---
+        # XML tab: pretty-print
         try {
             $xd = New-Object System.Xml.XmlDocument
-            $xd.LoadXml($res.Xml)
+            $xd.LoadXml($xml)
             $sb = New-Object System.Text.StringBuilder
             $sw = New-Object System.IO.StringWriter($sb)
             $xw = New-Object System.Xml.XmlTextWriter($sw)
@@ -659,15 +940,16 @@ $bgWorker.Add_RunWorkerCompleted({
             $xw.Flush()
             $rtbXml.Text = $sb.ToString()
         } catch {
-            $rtbXml.Text = $res.Xml
+            $rtbXml.Text = $xml
         }
+        $rtbXml.SelectionStart = 0
+        $rtbXml.ScrollToCaret()
 
-        # --- Results tab: parsed rows grouped by section ---
-        $rows = ConvertFrom-AutodiscoverXml -RawXml $res.Xml
+        # Results tab: parsed rows grouped by section
+        $rows = ConvertFrom-AutodiscoverXml -RawXml $xml
         $lvwResults.BeginUpdate()
         $lvwResults.Items.Clear()
         $lvwResults.Groups.Clear()
-
         $groupMap = @{}
         foreach ($row in $rows) {
             if (-not $groupMap.ContainsKey($row.Group)) {
@@ -684,23 +966,91 @@ $bgWorker.Add_RunWorkerCompleted({
 
         $form.Text = "Test E-Mail AutoConfiguration  —  OK"
         $rtbLog.AppendText("`r`nAutoDiscover completed successfully.`r`n")
-
-        # Switch to Results if we got data, otherwise XML
-        if ($rows.Count -gt 0) {
-            $tabCtrl.SelectedTab = $tabResults
-        } else {
-            $tabCtrl.SelectedTab = $tabXml
-        }
+        if ($rows.Count -gt 0) { $tabCtrl.SelectedTab = $tabResults }
+        else                    { $tabCtrl.SelectedTab = $tabXml }
     } else {
         $form.Text = "Test E-Mail AutoConfiguration  —  No configuration found"
         $rtbLog.AppendText("`r`nAutoDiscover failed for all tested methods.`r`n")
         $tabCtrl.SelectedTab = $tabLog
     }
-})
+
+    # Clean up runspace
+    try { $script:CurrentPS.Dispose() }   catch {}
+    try { $script:CurrentRS.Close();  $script:CurrentRS.Dispose() } catch {}
+    $script:CurrentPS   = $null
+    $script:CurrentRS   = $null
+    $script:CurrentSync = $null
+}
 
 #endregion ===================================================================
 #  CONTROL INTERACTIONS
 #==============================================================================
+
+# Adjusts visible/enabled state of all sub-controls based on current auth selection
+function Update-AuthMode {
+    $isModern = $radModernAuth.Checked
+    $pnlModernSub.Enabled      = $isModern
+    $chkUseCurrentUser.Enabled = -not $isModern
+    $useExplicit = (-not $isModern) -and (-not $chkUseCurrentUser.Checked)
+    $lblPass.Enabled = $useExplicit
+    $txtPass.Enabled = $useExplicit
+    if (-not $useExplicit) { $txtPass.Clear() }
+    Update-Layout
+}
+
+# Repositions standalone options, separator, progress bar, and tab control
+# based on whether ACF rows are visible
+function Update-Layout {
+    $showACF = $radACF.Checked -and $radModernAuth.Checked
+    $lblClientId.Visible  = $showACF
+    $txtClientId.Visible  = $showACF
+    $btnCreateApp.Visible = $showACF
+    $lblTenantId.Visible  = $showACF
+    $txtTenantId.Visible  = $showACF
+    $y = if ($showACF) { 179 } else { 133 }
+    $chkIgnoreCert.Top = $y
+    $chkUseSCP.Top     = $y
+    $pnlSep.Top        = $y + 23
+    $prgBar.Top        = $y + 31
+    $tabCtrl.Top       = $y + 50
+    $tabCtrl.Height    = $form.ClientSize.Height - ($y + 50) - 9
+}
+
+# Looks up the tenant ID for the domain in $txtEmail via the OIDC discovery endpoint.
+# Runs synchronously with DoEvents so "Detecting…" is visible before the HTTP call.
+# Triggered when ACF is selected or when the email field loses focus while ACF is active.
+function Resolve-TenantId {
+    if (-not $radACF.Checked) { return }
+    $email = $txtEmail.Text.Trim()
+    if ($email -notmatch '@([^@\s]+)$') { return }
+    $domain = $Matches[1]
+    $txtTenantId.Text    = "Detecting…"
+    $txtTenantId.Enabled = $false
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    [System.Windows.Forms.Application]::DoEvents()
+    $tid = $null
+    try {
+        $req = [System.Net.HttpWebRequest]::Create(
+            "https://login.microsoftonline.com/$([Uri]::EscapeDataString($domain))/.well-known/openid-configuration")
+        $req.Method  = "GET"
+        $req.Timeout = 8000
+        $rp = $req.GetResponse()
+        $j  = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+        $rp.Close()
+        if ($j.token_endpoint -match '/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/') {
+            $tid = $Matches[1]
+        }
+    } catch {}
+    $txtTenantId.Text    = if ($tid) { $tid } else { '' }
+    $txtTenantId.Enabled = $true
+    $form.Cursor         = [System.Windows.Forms.Cursors]::Default
+}
+
+$radModernAuth.Add_CheckedChanged({ if ($radModernAuth.Checked) { Update-AuthMode } })
+$radWIA.Add_CheckedChanged({        if ($radWIA.Checked)        { Update-AuthMode } })
+$radDCF.Add_CheckedChanged({        if ($radDCF.Checked)        { Update-Layout  } })
+$radACF.Add_CheckedChanged({        if ($radACF.Checked)        { Update-Layout; Resolve-TenantId } })
+$txtEmail.Add_Leave({ Resolve-TenantId })
 
 $chkUseCurrentUser.Add_CheckedChanged({
     $useExplicit     = -not $chkUseCurrentUser.Checked
@@ -977,6 +1327,17 @@ $btnTest.Add_Click({
         return
     }
 
+    if ($radModernAuth.Checked -and $radACF.Checked) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Authorization Code Flow is not yet implemented.`nPlease use 'Public Office app and Device Code Flow' instead.",
+            "Not Implemented",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+        return
+    }
+
+
     # Certificate validation callback
     if ($chkIgnoreCert.Checked) {
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
@@ -995,25 +1356,135 @@ $btnTest.Add_Click({
     $btnCancel.Enabled   = $true
     $tabCtrl.SelectedTab = $tabLog
 
-    $bgWorker.RunWorkerAsync([PSCustomObject]@{
+    # Build the sync hash that bridges UI thread and test runspace
+    $sync = [hashtable]::Synchronized(@{
         Email          = $email
         Password       = $txtPass.Text
-        UseWindowsAuth = $chkUseCurrentUser.Checked
+        UseWindowsAuth = $radWIA.Checked -and $chkUseCurrentUser.Checked
+        ModernAuth     = $radModernAuth.Checked
+        UseDeviceCode  = $radDCF.Checked
+        ClientId       = $txtClientId.Text.Trim()
+        TenantId       = $txtTenantId.Text.Trim()
+        UseSCP         = $chkUseSCP.Checked
+        Cancel         = $false
+        Done           = $false
+        Xml            = $null
+        Pct            = 0
+        Queue          = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     })
+    $script:CurrentSync = $sync
+
+    # Create a dedicated runspace so PS script blocks work without issues
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.ApartmentState = [System.Threading.ApartmentState]::STA
+    $rs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+    $rs.Open()
+    $script:CurrentRS = $rs
+
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($script:TestScript).AddArgument($sync)
+    $script:CurrentPS = $ps
+    [void]$ps.BeginInvoke()
+
+    # Poll timer: drain log queue and check for completion (runs on UI thread)
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 100
+    $timer.Add_Tick({
+        $msg = $null
+        while ($script:CurrentSync -and $script:CurrentSync.Queue.TryDequeue([ref]$msg)) {
+            $rtbLog.AppendText("$msg`r`n")
+            $rtbLog.ScrollToCaret()
+        }
+        if ($script:CurrentSync) {
+            $v = $script:CurrentSync.Pct
+            if ($v -ge 0 -and $v -le 100) { $prgBar.Value = $v }
+        }
+        if ($script:CurrentSync -and $script:CurrentSync.Done) {
+            Complete-Test
+        }
+    })
+    $script:PollTimer = $timer
+    $timer.Start()
 })
 
 $btnCancel.Add_Click({
-    $bgWorker.CancelAsync()
+    if ($script:CurrentSync) { $script:CurrentSync.Cancel = $true }
     $btnCancel.Enabled = $false
     $rtbLog.AppendText("Cancelling...`r`n")
 })
 
 $form.Add_FormClosing({
-    if ($bgWorker.IsBusy) { $bgWorker.CancelAsync() }
+    if ($script:CurrentSync) { $script:CurrentSync.Cancel = $true }
+    if ($script:PollTimer)   { $script:PollTimer.Stop() }
+    try { $script:CurrentPS.Dispose() }   catch {}
+    try { $script:CurrentRS.Close();  $script:CurrentRS.Dispose() } catch {}
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 })
 
 #==============================================================================
 #  START
 #==============================================================================
+
+# Load saved config (Client ID from a previous "Register App")
+if (Test-Path $script:configPath) {
+    try {
+        $cfg = Get-Content $script:configPath -Raw | ConvertFrom-Json
+        if ($cfg.ClientId) { $txtClientId.Text = $cfg.ClientId }
+    } catch {}
+}
+
+# Detect domain-joined status and set SCP checkbox accordingly
+$chkUseSCP.Checked = $false
+try {
+    [void][System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain()
+    $chkUseSCP.Checked = $true
+} catch {}
+
+# Pre-fill e-mail with the logged-in user's UPN (multiple fallback methods)
+$upn = ''
+
+# Method 1: WindowsIdentity UPN claim (works on domain-joined with Kerberos)
+if (-not $upn) {
+    try {
+        $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $claim = $id.Claims | Where-Object {
+            $_.Type -eq 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn'
+        } | Select-Object -First 1
+        if ($claim -and $claim.Value) { $upn = $claim.Value }
+    } catch {}
+}
+
+# Method 2: USERPRINCIPALNAME environment variable (set by some SSO/MDM solutions)
+if (-not $upn) {
+    try {
+        if ($env:USERPRINCIPALNAME -and $env:USERPRINCIPALNAME -match '@') {
+            $upn = $env:USERPRINCIPALNAME
+        }
+    } catch {}
+}
+
+# Method 3: ADSI lookup in Active Directory (domain-joined machines)
+if (-not $upn) {
+    try {
+        $searcher = [adsisearcher]"samaccountname=$env:USERNAME"
+        [void]$searcher.PropertiesToLoad.Add("userprincipalname")
+        $result = $searcher.FindOne()
+        if ($result) {
+            $val = $result.Properties['userprincipalname']
+            if ($val -and $val.Count -gt 0 -and $val[0] -match '@') { $upn = $val[0] }
+        }
+    } catch {}
+}
+
+# Method 4: whoami /upn (works on domain-joined, may be slow on non-domain machines)
+if (-not $upn) {
+    try {
+        $w = & whoami.exe /upn 2>$null
+        if ($w -and $w.Trim() -match '@') { $upn = $w.Trim() }
+    } catch {}
+}
+
+if ($upn) { $txtEmail.Text = $upn }
+
 [System.Windows.Forms.Application]::Run($form)
