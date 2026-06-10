@@ -407,7 +407,11 @@ function ConvertFrom-AutodiscoverXml {
             & $add $grp "OOF URL"                 (& $txt $proto "ad:OOFUrl")
             & $add $grp "Availability Service URL" (& $txt $proto "ad:ASUrl")
             & $add $grp "EMWS URL"                (& $txt $proto "ad:EmwsUrl")
+            & $add $grp "ECP URL"                 (& $txt $proto "ad:EcpUrl")
+            & $add $grp "Sharing URL"             (& $txt $proto "ad:SharingUrl")
+            & $add $grp "UM URL"                  (& $txt $proto "ad:UMUrl")
             & $add $grp "Public Folder Server"    (& $txt $proto "ad:PublicFolderServer")
+            & $add $grp "Server Exclusive Connect" (& $txt $proto "ad:ServerExclusiveConnect")
             & $add $grp "Autodiscover Internal"   (& $txt $proto "ad:AutodiscoverServiceInternalUri")
 
             # WEB protocol: OWA URLs are nested under Internal/External
@@ -435,12 +439,16 @@ function ConvertFrom-AutodiscoverXml {
     return ,$rows   # comma forces List to stay as-is, not unroll
 }
 
-# Extract all testable (absolute https?://) URLs from AutoDiscover XML, deduplicated
+# Extract all testable (absolute https?://) URLs from AutoDiscover XML.
+# Dedup is per-protocol so the same URL appearing under different protocol
+# sections (e.g. EXCH, EXPR and EXHTTP all pointing at ews/exchange.asmx)
+# is shown once per section. Within a section, fields sharing a URL are merged.
 function Get-AutodiscoverUrls {
     param([string]$RawXml)
 
     $results   = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $seen      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    # key "protocol`n url" -> row object (so we can append field names)
+    $rowMap    = @{}
     $mapiHosts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
     $addUrl = {
@@ -453,8 +461,17 @@ function Get-AutodiscoverUrls {
         if ($protoType -eq 'mapiHttp' -and $url -match '\?') {
             $url = ($url -split '\?')[0]
         }
-        if ($seen.Add($url)) {
-            $results.Add([PSCustomObject]@{ Protocol = $protoType; Field = $field; Url = $url })
+        $key = "$protoType`n$url"
+        if ($rowMap.ContainsKey($key)) {
+            # Same URL already listed for this protocol — merge the field label
+            $existing = $rowMap[$key]
+            if (($existing.Field -split ', ') -notcontains $field) {
+                $existing.Field = "$($existing.Field), $field"
+            }
+        } else {
+            $row = [PSCustomObject]@{ Protocol = $protoType; Field = $field; Url = $url }
+            $rowMap[$key] = $row
+            $results.Add($row)
         }
         # Track unique MAPI hosts so we can add /mapi/healthcheck.htm below
         if ($protoType -eq 'mapiHttp' -and $url -match '^(https?://[^/]+)') {
@@ -473,7 +490,7 @@ function Get-AutodiscoverUrls {
             $protoType = if ($typeNode) { $typeNode.InnerText } else { $proto.GetAttribute("Type") }
             if (-not $protoType) { $protoType = "?" }
 
-            foreach ($f in @("EwsUrl","ASUrl","OABUrl","OofUrl","EcpUrl","SharingUrl","EmwsUrl","UMUrl","EwsPartnerUrl")) {
+            foreach ($f in @("EwsUrl","ASUrl","OABUrl","OOFUrl","EcpUrl","SharingUrl","EmwsUrl","UMUrl","EwsPartnerUrl")) {
                 $n = $proto.SelectSingleNode("ad:$f", $ns)
                 if ($n) { & $addUrl $protoType $f $n.InnerText }
             }
@@ -496,8 +513,11 @@ function Get-AutodiscoverUrls {
         # Health check for each unique MAPI/HTTP host
         foreach ($h in $mapiHosts) {
             $hcUrl = "$h/mapi/healthcheck.htm"
-            if ($seen.Add($hcUrl)) {
-                $results.Add([PSCustomObject]@{ Protocol = 'mapiHttp'; Field = 'Healthcheck'; Url = $hcUrl })
+            $key   = "mapiHttp`n$hcUrl"
+            if (-not $rowMap.ContainsKey($key)) {
+                $row = [PSCustomObject]@{ Protocol = 'mapiHttp'; Field = 'Healthcheck'; Url = $hcUrl }
+                $rowMap[$key] = $row
+                $results.Add($row)
             }
         }
     } catch {}
@@ -2164,9 +2184,12 @@ $btnAddTests.Add_Click({
 
     $dlg.Controls.AddRange(@($lv, $lblProg, $btnSaveCsv, $btnCopyCsv, $btnDlgClose))
 
-    # Pre-populate rows with placeholder status
+    # Pre-populate rows with placeholder status. Key by index, not URL, because
+    # the same URL can legitimately appear under several protocol sections.
     $lvItems = @{}
-    foreach ($entry in $urlList) {
+    for ($i = 0; $i -lt $urlList.Count; $i++) {
+        $entry = $urlList[$i]
+        $entry | Add-Member -NotePropertyName Index -NotePropertyValue $i -Force
         $item = New-Object System.Windows.Forms.ListViewItem($entry.Protocol)
         [void]$item.SubItems.Add($entry.Field)
         [void]$item.SubItems.Add("…")
@@ -2174,7 +2197,7 @@ $btnAddTests.Add_Click({
         [void]$item.SubItems.Add("")
         $item.ForeColor = [System.Drawing.Color]::Gray
         [void]$lv.Items.Add($item)
-        $lvItems[$entry.Url] = $item
+        $lvItems[$i] = $item
     }
 
     # Sync bridge for runspace → UI
@@ -2212,6 +2235,7 @@ $btnAddTests.Add_Click({
         foreach ($entry in $urlList) {
             if ($uSync.Cancel) { break }
             $url    = $entry.Url
+            $idx    = $entry.Index
             $status = 0
             $info   = ''
             try {
@@ -2219,7 +2243,13 @@ $btnAddTests.Add_Click({
                 $req.Method            = "GET"
                 $req.AllowAutoRedirect = $false
                 $req.Timeout           = 10000
-                $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
+                # Use a browser-like User-Agent and Accept header. The MAPI/HTTP
+                # endpoints (/mapi/emsmdb, /mapi/nspi) serve their friendly
+                # "Connectivity Endpoint" HTML page (HTTP 200) to browsers, but
+                # return HTTP 500 to an Office User-Agent because the server then
+                # routes the request into the MAPI handler, which expects a POST.
+                $req.UserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                $req.Accept            = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 if ($authHeader) {
                     $req.Headers["Authorization"] = $authHeader
                 } elseif ($useWinAuth) {
@@ -2252,7 +2282,7 @@ $btnAddTests.Add_Click({
                 $status = -1
                 $info   = $_.Exception.Message
             }
-            $uSync.Queue.Enqueue(@{ Url = $url; Status = $status; Info = $info })
+            $uSync.Queue.Enqueue(@{ Index = $idx; Status = $status; Info = $info })
             $uSync.Tested++
         }
         $uSync.Done = $true
@@ -2265,8 +2295,8 @@ $btnAddTests.Add_Click({
     $uTimer.Add_Tick({
         $upd = $null
         while ($uSync.Queue.TryDequeue([ref]$upd)) {
-            if ($lvItems.ContainsKey($upd.Url)) {
-                $item = $lvItems[$upd.Url]
+            if ($lvItems.ContainsKey($upd.Index)) {
+                $item = $lvItems[$upd.Index]
                 $s    = $upd.Status
                 $item.SubItems[2].Text = if ($s -lt 0) { "ERR" } else { "$s" }
                 $item.SubItems[4].Text = $upd.Info
