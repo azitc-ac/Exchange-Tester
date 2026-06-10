@@ -1455,7 +1455,7 @@ $btnCreateApp.Add_Click({
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     [System.Windows.Forms.Application]::DoEvents()
 
-    $appBody  = '{"displayName":"Exchange Tester","isFallbackPublicClient":true}'
+    $appBody  = '{"displayName":"Exchange Tester","isFallbackPublicClient":true,"publicClient":{"redirectUris":["http://localhost"]}}'
     $appBytes = [System.Text.Encoding]::UTF8.GetBytes($appBody)
     $newId    = $null
     try {
