@@ -3771,8 +3771,8 @@ function New-FreeBusySoap {
         '<soap:Header><t:RequestServerVersion Version="Exchange2013"/></soap:Header>' +
         '<soap:Body><m:GetUserAvailabilityRequest>' +
         '<t:TimeZone><t:Bias>0</t:Bias>' +
-        '<t:StandardTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:StandardTime>' +
-        '<t:DaylightTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:DaylightTime>' +
+        '<t:StandardTime><t:Bias>0</t:Bias><t:Time>03:00:00</t:Time><t:DayOrder>5</t:DayOrder><t:Month>10</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:StandardTime>' +
+        '<t:DaylightTime><t:Bias>-60</t:Bias><t:Time>02:00:00</t:Time><t:DayOrder>5</t:DayOrder><t:Month>3</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:DaylightTime>' +
         '</t:TimeZone>' +
         '<m:MailboxDataArray><t:MailboxData><t:Email><t:Address>' + $Target + '</t:Address></t:Email>' +
         '<t:AttendeeType>Required</t:AttendeeType><t:ExcludeConflicts>false</t:ExcludeConflicts></t:MailboxData></m:MailboxDataArray>' +
