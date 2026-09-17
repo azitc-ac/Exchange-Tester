@@ -2791,7 +2791,11 @@ $script:HybridTestScript = {
             $wh.SetTimeouts(20000, 20000, 20000, 20000)
             if ($ignoreCert) { $wh.Option(4) = 13056 }   # SslErrorIgnoreFlags = 0x3300
             $wh.Option(6) = $false                        # EnableRedirects = false
-            if ($user) { $wh.SetCredentials($user, $pass, 0) }  # 0 = for server
+            if ($user) {
+                $wh.SetCredentials($user, $pass, 0)       # 0 = for server
+            } else {
+                $wh.SetAutoLogonPolicy(0)                 # 0 = Always: use logged-in Windows creds
+            }
             $wh.Send()
             return @{ Code = [int]$wh.Status; Error = $null }
         } catch {
@@ -3066,24 +3070,22 @@ $script:HybridTestScript = {
     if (-not $abort -and -not $sync.Cancel) {
         & $setPct 72
         $who = if ($netCred) { $user } else { "logged-in user ($env:USERDOMAIN\$env:USERNAME)" }
-        if ($netCred) {
-            # Explicit creds: probe via WinHTTP (handles Extended Protection / channel binding)
-            & $logLine "Authenticated probe as $who (WinHTTP, Extended-Protection capable) starting."
-            $r2 = & $mrsGetWinHttp $mrsUrl $user $pass $sync.IgnoreCert
-            # If WinHTTP itself failed to run, fall back to the .NET probe
-            if ($r2.Code -lt 0) {
-                & $logLine "WinHTTP probe unavailable ($($r2.Error)); falling back to .NET probe."
-                $r2 = & $mrsGet $mrsUrl $netCred
-            }
-        } else {
-            & $logLine "Authenticated probe as $who starting."
-            $r2 = & $mrsGet $mrsUrl 'default'
+        # Probe via WinHTTP for both explicit and logged-in credentials — WinHTTP
+        # supplies the TLS channel-binding token, satisfying Extended Protection.
+        & $logLine "Authenticated probe as $who (WinHTTP, Extended-Protection capable) starting."
+        $probeUser = if ($netCred) { $user } else { '' }
+        $probePass = if ($netCred) { $pass } else { '' }
+        $r2 = & $mrsGetWinHttp $mrsUrl $probeUser $probePass $sync.IgnoreCert
+        if ($r2.Code -lt 0) {
+            & $logLine "WinHTTP probe unavailable ($($r2.Error)); falling back to .NET probe."
+            $fallbackCred = if ($netCred) { $netCred } else { 'default' }
+            $r2 = & $mrsGet $mrsUrl $fallbackCred
         }
         if ($r2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($r2.Code)." }
         if ($r2.Code -eq 200) {
             & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — NTLM/Negotiate authentication succeeded"
         } elseif ($r2.Code -eq 401) {
-            & $addRow "MRS Proxy authentication" "WARN" "HTTP 401 as $who — Windows auth did not complete. Check the password, or this is Extended Protection on the EWS vdir (a local HTTP probe may not satisfy channel binding). This does not necessarily block real moves — use 'Verify from Exchange Online' for the authoritative result."
+            & $addRow "MRS Proxy authentication" "WARN" "HTTP 401 as $who — Windows auth was rejected. Likely a wrong password, or the account cannot sign in (a shared/resource mailbox usually has a disabled AD account). Migration-endpoint auth needs an enabled on-prem account; 'Verify from Exchange Online' is the authoritative check."
         } elseif ($r2.Code -eq 403) {
             & $addRow "MRS Proxy authentication" "WARN" "HTTP 403 as $who — authenticated but access denied (check MRSProxyEnabled on the EWS vdir)"
         } elseif ($r2.Code -lt 0) {
