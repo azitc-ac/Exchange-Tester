@@ -1,10 +1,11 @@
 # Exchange Tester
 
-A standalone Windows tool for diagnosing Exchange connectivity — no Outlook, no installation required. It opens on a **start screen** offering three tools:
+A standalone Windows tool for diagnosing Exchange connectivity — no Outlook, no installation required. It opens on a **start screen** offering four tools:
 
 1. **E-Mail AutoConfiguration** — replicates Outlook's "Test E-Mail AutoConfiguration" (Ctrl + right-click the Outlook tray icon), plus a per-endpoint connectivity tester.
 2. **Hybrid Deployment (MRS Proxy)** — a step-by-step diagnostic of the on-premises mailbox-migration endpoint used by hybrid mailbox moves.
 3. **Hybrid Connectivity** — a broad reachability sweep of on-prem + Exchange Online coexistence endpoints (AutoDiscover, OAuth, Free/Busy, vdir health).
+4. **Free/Busy (Cross-Premises)** — an authenticated availability test in both directions with real mailboxes (On-Prem ↔ Exchange Online).
 
 Closing any tool returns to the start screen; closing the start screen exits.
 
@@ -154,6 +155,27 @@ A broad reachability sweep across on-prem + Exchange Online coexistence endpoint
 | Health | `/<vdir>/healthcheck.htm` for the standard on-prem virtual directories |
 
 Results use the same reachability verdict, colouring and CSV export as Additional Tests. On-prem endpoints authenticate with the current Windows user (**200 OK**); **Exchange Online** endpoints return **"Reachable — auth required"** (401 with a Bearer challenge) — this is the expected, healthy result for an unauthenticated probe, not an error. To probe Exchange Online endpoints *authenticated*, use the E-Mail AutoConfiguration test's Modern Auth + Additional Tests.
+
+---
+
+## 4. Free/Busy (Cross-Premises)
+
+Tests hybrid **availability sharing** with real mailboxes, in both directions, using the standard EWS `GetUserAvailability` operation (a documented SOAP call — reliable, unlike the internal MRSProxy binding). Enter the on-prem EWS host, on-prem credentials, and one mailbox on each side, then **Test**:
+
+| Direction | How | Auth |
+|---|---|---|
+| **On-Prem → EXO** | on-prem EWS queries the free/busy of the **EXO mailbox** | Windows (NTLM/Negotiate via WinHTTP — handles Extended Protection) |
+| **EXO → On-Prem** | Exchange Online EWS queries the free/busy of the **on-prem mailbox** | OAuth — device-code sign-in as the EXO mailbox user |
+
+Each row interprets the EWS response:
+
+| Result | Meaning |
+|---|---|
+| **OK** | `ResponseCode NoError` + a real `FreeBusyViewType` → cross-premises free/busy works |
+| **WARN** | `NoError` but `FreeBusyViewType None` → call succeeded but no data (missing cross-org access or calendar permission) |
+| **FAIL** | an EWS error code / SOAP fault (shown), or HTTP 401 (auth failed) |
+
+Hover a row for the raw response; **double-click** to view it in full (and copy it to the clipboard). Leaving the On-Prem User empty uses the logged-in Windows user for the On-Prem → EXO direction.
 
 ---
 
