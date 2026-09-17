@@ -2722,7 +2722,17 @@ $script:HybridTestScript = {
             $req.AllowAutoRedirect = $false
             $req.Timeout           = 20000
             $req.UserAgent         = "ExchangeMigrationTester/1.0"
-            if ($cred -is [System.Net.NetworkCredential]) { $req.Credentials = $cred }
+            if ($cred -is [System.Net.NetworkCredential]) {
+                # Bind the credential to both Windows auth schemes the endpoint
+                # offers. Negotiate lets Kerberos consume a UPN (maxm@domain);
+                # NTLM is the fallback. A CredentialCache is the correct way to
+                # supply explicit creds for these schemes.
+                $cc = New-Object System.Net.CredentialCache
+                $u  = New-Object System.Uri($url)
+                $cc.Add($u, "Negotiate", $cred)
+                $cc.Add($u, "NTLM",      $cred)
+                $req.Credentials = $cc
+            }
             elseif ($cred -eq 'default')                  { $req.UseDefaultCredentials = $true }
             try {
                 $rp   = $req.GetResponse()
