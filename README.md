@@ -1,6 +1,12 @@
 # Exchange Tester
 
-A standalone Windows tool that replicates Outlook's **"Test E-Mail AutoConfiguration"** dialog (Ctrl + right-click on Outlook's tray icon) — no Outlook, no installation required — and adds a per-endpoint connectivity tester on top.
+A standalone Windows tool for diagnosing Exchange connectivity — no Outlook, no installation required. It opens on a **start screen** offering three tools:
+
+1. **E-Mail AutoConfiguration** — replicates Outlook's "Test E-Mail AutoConfiguration" (Ctrl + right-click the Outlook tray icon), plus a per-endpoint connectivity tester.
+2. **Hybrid Deployment (MRS Proxy)** — a step-by-step diagnostic of the on-premises mailbox-migration endpoint used by hybrid mailbox moves.
+3. **Hybrid Connectivity** — a broad reachability sweep of on-prem + Exchange Online coexistence endpoints (AutoDiscover, OAuth, Free/Busy, vdir health).
+
+Closing any tool returns to the start screen; closing the start screen exits.
 
 ---
 
@@ -33,7 +39,9 @@ The e-mail field is pre-filled with the logged-in user's UPN where it can be det
 
 ---
 
-## What it tests
+## 1. E-Mail AutoConfiguration
+
+### What it tests
 
 When **Use SCP** is checked (default on domain-joined machines), the tool runs in the same order as Outlook:
 
@@ -47,82 +55,96 @@ When **Use SCP** is checked (default on domain-joined machines), the tool runs i
 | 5 | HTTP redirect | `http://autodiscover.<domain>/autodiscover/autodiscover.xml` |
 | 6 | DNS SRV | `_autodiscover._tcp.<domain>` |
 
-Each step is logged with HTTP status codes identical to Outlook's protocol log (`GetLastError=0; httpStatus=401.` etc.).
+Each step is logged with HTTP status codes identical to Outlook's protocol log (`GetLastError=0; httpStatus=401.` etc.). The request sends `X-MapiHttpCapability: 1`, so Exchange returns the **MAPI/HTTP** (`mapiHttp`) protocol block with the MailStore and AddressBook URLs, just like Outlook.
 
-The AutoDiscover request sends `X-MapiHttpCapability: 1`, so Exchange returns the **MAPI/HTTP** (`mapiHttp`) protocol block with the MailStore and AddressBook URLs, exactly like Outlook.
-
----
-
-## Authentication
+### Authentication
 
 Pick the top-level mode, then a sub-option:
 
 | Mode | Sub-option | Behaviour |
 |------|-----------|-----------|
 | **Modern Auth (OAuth2)** | Public Office app + **Device Code Flow** *(default)* | Shows a short code; you sign in at `microsoft.com/devicelogin` in any browser (MFA supported). No app registration required. |
-| **Modern Auth (OAuth2)** | Own "Exchange Tester" app + **Auth Code Flow (PKCE)** | Opens your browser automatically, signs in, and redirects to a local listener — no code to copy. Requires a one-time app registration (see below). |
+| **Modern Auth (OAuth2)** | Own "Exchange Tester" app + **Auth Code Flow (PKCE)** | Opens your browser automatically and redirects to a local listener — no code to copy. Requires a one-time app registration (see below). |
 | **Windows Integrated Auth** | Use logged-in user *(default)* | Current Windows credentials via Kerberos / NTLM. |
 | **Windows Integrated Auth** | Uncheck + enter password | Sends e-mail address + password as explicit credentials. |
 
-The tenant ID is detected automatically from the e-mail domain when Auth Code Flow is selected.
+The tenant ID is detected automatically from the e-mail domain. Device Code Flow resolves a concrete tenant (or `/organizations`) and requests the `EWS.AccessAsUser.All` scope, avoiding the `AADSTS50059` "no tenant" error.
 
----
+### Registering your own app (Auth Code Flow)
 
-## Modern Auth: registering your own app
-
-Auth Code Flow needs an Azure AD app registration. The **Register App** button (visible when "Own Exchange Tester app" is selected) does the whole thing for you:
+The **Register App** button (shown when "Own Exchange Tester app" is selected) does everything via Microsoft Graph:
 
 1. Enter your e-mail; the **Tenant ID** is detected automatically.
-2. Click **Register App**.
-3. Your browser opens — sign in as an **Application Administrator** or **Global Admin**.
-4. The tool creates the app registration via Microsoft Graph with:
-   - Redirect URI `http://localhost` (loopback — any port matches)
-   - API permissions: `EWS.AccessAsUser.All`, `User.Read`, `offline_access`
-   - **Tenant-wide admin consent** granted automatically
-5. The new **Client ID** is filled in and saved to `ExchangeTester.config` for next time.
+2. Click **Register App** and sign in as an **Application Administrator** or **Global Admin**.
+3. The app is created with redirect URI `http://localhost`, API permissions `EWS.AccessAsUser.All`, `User.Read`, `offline_access`, and **tenant-wide admin consent** granted automatically.
+4. The new **Client ID** is filled in and saved to `ExchangeTester.config`.
 
-After that, the **Test** and **Additional Tests** buttons use Auth Code Flow with that app — no portal steps, no manual consent.
+No portal steps and no manual consent afterwards. Prefer zero setup? Use the default Device Code Flow.
 
-If you prefer not to register an app, just use the default **Device Code Flow**, which needs no setup.
+### Additional Tests (per-endpoint connectivity)
 
----
+After a successful run, **Additional Tests** probes every endpoint in the response and shows a per-URL result, colour-coded by a reachability **verdict** (not pass/fail — a service answering with an auth challenge or redirect is reachable/healthy):
 
-## Additional Tests (per-endpoint connectivity)
+| Verdict | Meaning |
+|---|---|
+| OK (200) | Reachable |
+| Reachable (redirect) | 3xx |
+| Reachable — auth required / needs POST | 401 / 405 |
+| Not present | 404 |
+| Server error | 5xx |
+| Unreachable | connection failed |
 
-After a successful AutoDiscover run, the **Additional Tests** button opens a dialog that probes every endpoint found in the response and shows the HTTP result per URL — colour-coded (green 200, orange 3xx, amber 401, red 4xx/5xx/error).
+- **Follows the selected auth mode** (Modern Auth Bearer token, reused for ~55 min; or Windows / explicit credentials).
+- Every protocol section is shown (EXCH, EXPR, EXHTTP, mapiHttp, WEB).
+- **MAPI/HTTP** URLs are probed at their base path with a browser-like request so `/mapi/emsmdb` and `/mapi/nspi` return their friendly "Connectivity Endpoint" page instead of 500.
+- **Healthcheck basis test** — `/<vdir>/healthcheck.htm` for the standard vdirs (`autodiscover`, `ews`, `oab`, `owa`, `ecp`, `mapi`, `rpc`, `Microsoft-Server-ActiveSync`) plus any vdir seen in the response.
+- **Copy CSV** / **Save CSV…** export the table (semicolon-separated); right-click a row to copy the URL.
 
-Key points:
-
-- **Follows the selected auth mode.** Modern Auth probes send the OAuth2 Bearer token (reusing the token from the main test for ~55 min, otherwise re-authenticating); WIA probes use the current Windows user or explicit credentials.
-- **Every protocol section is shown** (EXCH, EXPR, EXHTTP, mapiHttp, WEB), even when several point at the same URL.
-- **MAPI/HTTP** URLs are probed at their base path with a browser-like request, so `/mapi/emsmdb` and `/mapi/nspi` return their friendly "Connectivity Endpoint" page (200) instead of 500.
-- **Healthcheck basis test.** For each host, the tool probes `/<vdir>/healthcheck.htm` for the standard Exchange virtual directories — `autodiscover`, `ews`, `oab`, `owa`, `ecp`, `mapi`, `rpc`, `Microsoft-Server-ActiveSync` — plus any extra vdir seen in the AutoDiscover URLs. This gives a consistent reachability baseline across all vdirs, including ones AutoDiscover doesn't return (e.g. OAB).
-- **Export.** **Copy CSV** / **Save CSV…** (and a right-click *Copy all as CSV*) export the table as semicolon-separated CSV; right-click a row to **Copy URL**.
-
----
-
-## Tabs
+### Tabs
 
 | Tab | Content |
 |-----|---------|
-| **Results** | Parsed settings grouped by section: User, Account, Protocol (EXCH, EXPR, EXHTTP, mapiHttp, WEB, …) including MailStore/AddressBook URLs |
+| **Results** | Parsed settings grouped by section: User, Account, Protocol (EXCH, EXPR, EXHTTP, mapiHttp, WEB…), MailStore/AddressBook URLs, **Alternative Mailboxes** (shared/delegate) and **Public Folder Information** |
 | **Log** | Step-by-step protocol log, identical format to Outlook |
 | **XML** | Raw AutoDiscover XML response, pretty-printed |
 
-**Right-click** on Log or XML for Copy, Select All, and (XML only) **Save XML As…**.
+Right-click Log or XML for Copy, Select All, and (XML) **Save XML As…**.
 
-> Note: the `ASUrl` field is labelled **Availability Service URL** — it is the EWS free/busy endpoint, not the ActiveSync URL.
+> The `ASUrl` field is labelled **Availability Service URL** — it is the EWS free/busy endpoint, not ActiveSync. The real ActiveSync URL is not part of the Outlook AutoDiscover schema.
 
 ---
 
-## Options
+## 2. Hybrid Deployment (MRS Proxy)
+
+Diagnoses the on-premises **migration endpoint** (`/EWS/mrsproxy.svc`) that Exchange Online uses for hybrid mailbox moves. Enter an on-prem mailbox (endpoint discovered via AutoDiscover) or the MRS endpoint FQDN directly, optional on-prem credentials, and run a step-by-step check:
+
+**Endpoint discovery → DNS resolution → TCP 443 → TLS handshake → Certificate trust / name match / validity → MRS Proxy endpoint → MRS Proxy authentication.**
+
+Tick **Verify from Exchange Online** to additionally run `Test-MigrationServerAvailability` inside EXO (AdminAPI, device-code sign-in as an Exchange admin) — the only check that proves Microsoft's datacenter can reach your endpoint. Each step reports **OK / WARN / FAIL** with details, plus a Log tab.
+
+---
+
+## 3. Hybrid Connectivity
+
+A broad reachability sweep across on-prem + Exchange Online coexistence endpoints, using the current Windows user. Enter an e-mail (its domain drives discovery) and optionally an on-prem host, then **Test**:
+
+| Category | Endpoints |
+|---|---|
+| AutoDiscover | on-prem (`autodiscover.<domain>` + root), Exchange Online V1 and V2 (`autodiscover.json`) |
+| OAuth | on-prem auth-metadata (`/autodiscover/metadata/json/1`), tenant OpenID configuration |
+| Free/Busy (EWS) | on-prem and Exchange Online `EWS/Exchange.asmx` |
+| Health | `/<vdir>/healthcheck.htm` for the standard on-prem virtual directories |
+
+Results use the same reachability verdict, colouring and CSV export as Additional Tests.
+
+---
+
+## Options (shared)
 
 | Option | Description |
 |--------|-------------|
-| Modern Auth (OAuth2) | Device Code Flow (no setup) or Auth Code Flow + PKCE (own app via **Register App**) |
-| Windows Integrated Auth | Current Windows user, or explicit e-mail + password |
-| Ignore certificate errors | Bypasses TLS certificate validation — useful for on-premises Exchange with self-signed certificates |
-| Use SCP (domain-joined) | Runs AD Service Connection Point lookup as step 1 (priority, like Outlook on domain-joined machines) |
+| Ignore certificate errors | Bypasses TLS certificate validation — for on-premises Exchange with self-signed / untrusted certificates. (TLS trust failures also surface a hint to enable this.) |
+| Use SCP (domain-joined) | AutoConfiguration only: runs the AD Service Connection Point lookup first, like Outlook on domain-joined machines |
 
 ---
 
