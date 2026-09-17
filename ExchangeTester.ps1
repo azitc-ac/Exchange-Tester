@@ -3981,13 +3981,21 @@ function Add-FbRow {
         $res = 'FAIL'; $det = "HTTP 401 — authentication failed. $Ctx"
     } elseif ($R.Http -lt 0) {
         $res = 'FAIL'; $det = "$($R.Fault) $Ctx"
-    } elseif ($R.ResponseCode -eq 'NoError' -and $R.ViewType -and $R.ViewType -ne 'None') {
-        $res = 'OK'; $det = "Free/busy retrieved (view = $($R.ViewType)) — cross-premises availability works. $Ctx"
-    } elseif ($R.ResponseCode -eq 'NoError' -and $R.ViewType -eq 'None') {
-        $res = 'WARN'; $det = "Call succeeded but returned no free/busy data (view = None) — the requestor may lack cross-org access or calendar permission. $Ctx"
+    } elseif ($R.ResponseCode -eq 'NoError') {
+        # NoError = the availability request was served (the cross-org path worked).
+        if ($R.ViewType -eq 'None') {
+            $res = 'WARN'; $det = "Availability lookup succeeded (NoError) but returned no data (view = None) — the target may restrict free/busy detail or sharing is limited. $Ctx"
+        } else {
+            $vt = if ($R.ViewType) { $R.ViewType } else { 'returned' }
+            $res = 'OK'; $det = "Cross-premises free/busy works — availability retrieved (view = $vt). $Ctx"
+        }
     } elseif ($R.ResponseCode) {
         $extra = if ($R.Message) { " — $($R.Message)" } else { '' }
-        $res = 'FAIL'; $det = "$($R.ResponseCode)$extra. $Ctx"
+        $hint = ''
+        if ($R.ResponseCode -match 'Proxy' -or "$($R.Message)" -match 'linked account|RBAC|OAuth|partner') {
+            $hint = "  Hint: hybrid OAuth/free-busy authorization issue on the target side — check the OAuth config (IntraOrganizationConnector, AuthServer, partner application / linked account) and run Test-OAuthConnectivity."
+        }
+        $res = 'FAIL'; $det = "$($R.ResponseCode)$extra.$hint $Ctx"
     } elseif ($R.Fault) {
         $res = 'FAIL'; $det = "$($R.Fault). $Ctx"
     } else {
