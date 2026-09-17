@@ -116,17 +116,35 @@ Right-click Log or XML for Copy, Select All, and (XML) **Save XML As…**.
 
 ## 2. Hybrid Deployment (MRS Proxy)
 
-Diagnoses the on-premises **migration endpoint** (`/EWS/mrsproxy.svc`) that Exchange Online uses for hybrid mailbox moves. Enter an on-prem mailbox (endpoint discovered via AutoDiscover) or the MRS endpoint FQDN directly, optional on-prem credentials, and run a step-by-step check:
+Diagnoses the on-premises **migration endpoint** (`/EWS/mrsproxy.svc`) that Exchange Online uses for hybrid mailbox moves. Enter an on-prem mailbox (the endpoint is discovered via AutoDiscover) or the MRS endpoint FQDN directly, plus the on-prem migration credentials, and run a step-by-step check:
 
-**Endpoint discovery → DNS resolution → TCP 443 → TLS handshake → Certificate trust / name match / validity → MRS Proxy endpoint → MRS Proxy authentication.**
+**Endpoint discovery → DNS resolution → TCP 443 → TLS handshake → Certificate trust / name match / validity → MRS Proxy endpoint → MRS Proxy authentication → MRS Proxy SOAP.**
 
-Tick **Verify from Exchange Online** to additionally run `Test-MigrationServerAvailability` inside EXO (AdminAPI, device-code sign-in as an Exchange admin) — the only check that proves Microsoft's datacenter can reach your endpoint. Each step reports **OK / WARN / FAIL** with details, plus a Log tab.
+Each step reports **OK / WARN / FAIL / INFO** with details. The window is resizable; **hover** a row for a tooltip and **double-click** it to read the full text (also copied to the clipboard). A Log tab shows the raw sequence.
+
+**How the auth check reads results:**
+
+- The endpoint probe returns **401** with a `WWW-Authenticate: NTLM, Negotiate` challenge — that is the healthy "published and reachable" signal.
+- The authenticated probe tries **NTLM explicitly** (as Exchange Online does — it can't reach the on-prem KDC for Kerberos) *and* **Negotiate** via WinHTTP, logging each. WinHTTP is used because it can satisfy **Extended Protection** channel binding, which .NET's `HttpWebRequest` cannot.
+- **HTTP 400 = authenticated success.** A `GET` to the WCF endpoint returns 400 once the credentials are accepted, because the endpoint expects a SOAP `POST`. This is normal and confirms a working MRS proxy.
+- The **SOAP probe** POSTs a real SOAP 1.1 envelope. Because the MRSProxy WCF binding is Microsoft-internal (it rejects standard SOAP 1.1/1.2 with 415/503), a hand-crafted local SOAP call is often inconclusive — the raw server response is written to the Log, and any WCF fault confirms the service is live.
+
+> Use the **on-prem migration credentials** in `DOMAIN\user` or UPN form (leave the field empty to use the logged-in Windows user). Note that a **shared/resource mailbox** usually has a disabled AD account and cannot authenticate.
+
+**Verify from Exchange Online** (checkbox) runs the authoritative `Test-MigrationServerAvailability` inside EXO. It signs in with a device code (as an Exchange admin) and calls the AdminAPI. That REST path cannot serialise the `Credentials` parameter for this cmdlet, so the tool detects the error and shows a ready-to-run PowerShell command instead (double-click the row to copy it):
+
+```powershell
+Connect-ExchangeOnline
+Test-MigrationServerAvailability -ExchangeRemoteMove -RemoteServer <host> -Credentials (Get-Credential)
+```
+
+A successful `New-MigrationEndpoint` in Exchange Online runs the same server-side check and is the definitive end-to-end proof.
 
 ---
 
 ## 3. Hybrid Connectivity
 
-A broad reachability sweep across on-prem + Exchange Online coexistence endpoints, using the current Windows user. Enter an e-mail (its domain drives discovery) and optionally an on-prem host, then **Test**:
+A broad reachability sweep across on-prem + Exchange Online coexistence endpoints, using the **current Windows user**. Enter an e-mail (its domain drives discovery) and optionally an on-prem host, then **Test**:
 
 | Category | Endpoints |
 |---|---|
@@ -135,7 +153,7 @@ A broad reachability sweep across on-prem + Exchange Online coexistence endpoint
 | Free/Busy (EWS) | on-prem and Exchange Online `EWS/Exchange.asmx` |
 | Health | `/<vdir>/healthcheck.htm` for the standard on-prem virtual directories |
 
-Results use the same reachability verdict, colouring and CSV export as Additional Tests.
+Results use the same reachability verdict, colouring and CSV export as Additional Tests. On-prem endpoints authenticate with the current Windows user (**200 OK**); **Exchange Online** endpoints return **"Reachable — auth required"** (401 with a Bearer challenge) — this is the expected, healthy result for an unauthenticated probe, not an error. To probe Exchange Online endpoints *authenticated*, use the E-Mail AutoConfiguration test's Modern Auth + Additional Tests.
 
 ---
 
