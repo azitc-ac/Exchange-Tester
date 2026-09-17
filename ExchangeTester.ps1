@@ -3394,7 +3394,10 @@ $script:HybridTestScript = {
                         $eMsg = try { ($eBody | ConvertFrom-Json).error.message } catch { $null }
                         if (-not $eMsg) { $eMsg = "HTTP $code — see Log tab" }
                         if ($eBody -match 'Unable to cast|InvalidCastException') {
-                            & $addRow "Test-MigrationServerAvailability" "INFO" "This cmdlet could not be invoked through the Exchange Online REST AdminAPI — a server-side serialization error on the Credentials parameter, i.e. a limitation of calling it this way, not an endpoint problem. Run 'Test-MigrationServerAvailability' in Exchange Online PowerShell, or rely on a successful New-MigrationEndpoint (which runs the same check server-side)."
+                            $psCmd = "Connect-ExchangeOnline; Test-MigrationServerAvailability -ExchangeRemoteMove -RemoteServer $fqdn -Credentials (Get-Credential)"
+                            & $logLine "EXO: this cmdlet is not callable via the REST AdminAPI. Run it in Exchange Online PowerShell:"
+                            & $logLine "     $psCmd"
+                            & $addRow "Test-MigrationServerAvailability" "INFO" "Not callable via the Exchange Online REST AdminAPI (server-side serialization error on the Credentials parameter — a limitation of this call path, not an endpoint problem). Run it in Exchange Online PowerShell instead (double-click this row to copy the command):  $psCmd  — or rely on a successful New-MigrationEndpoint, which runs the same check server-side."
                         } else {
                             $hint = if ($code -eq 401 -or $code -eq 403) { " (account needs an Exchange admin role with migration permissions)" } else { '' }
                             & $addRow "Test-MigrationServerAvailability" "FAIL" "$eMsg$hint"
