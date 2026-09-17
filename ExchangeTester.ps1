@@ -3104,7 +3104,7 @@ $script:HybridTestScript = {
             & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — authentication succeeded"
         } elseif ($r2.Code -eq 401) {
             $detail = if ($r2.Error) { " ($($r2.Error))" } else { "" }
-            & $addRow "MRS Proxy authentication" "INFO" "HTTP 401 as $who$detail — local authenticated probe did not complete. Exchange Online authenticates with NTLM from its datacenter; a local Kerberos attempt can fail on SPN configuration. This does not by itself mean the endpoint is broken — 'Verify from Exchange Online' (Test-MigrationServerAvailability) is the authoritative check, and a successful EXO migration-endpoint creation already proves it."
+            & $addRow "MRS Proxy authentication" "INFO" "HTTP 401 as $who$detail — both NTLM and Negotiate were rejected by a local probe. This tests plain Windows auth, which may not match how Exchange Online reached the endpoint (different source/trust or credential path). It does not by itself mean the endpoint or your migration is broken. Authoritative check: 'Verify from Exchange Online' (Test-MigrationServerAvailability) — a successful EXO migration-endpoint creation already confirms it. Tip: browse the EWS URL and sign in with the same account to see whether it can do Windows auth at all."
         } elseif ($r2.Code -eq 403) {
             & $addRow "MRS Proxy authentication" "WARN" "HTTP 403 as $who — authenticated but access denied (check MRSProxyEnabled on the EWS vdir)"
         } elseif ($r2.Code -lt 0) {
