@@ -14,6 +14,7 @@
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
@@ -3812,6 +3813,40 @@ function Invoke-FreeBusyProbe {
     }
 }
 
+# Discover the on-prem EWS URL for a mailbox via AutoDiscover (Windows auth via
+# WinHTTP, which handles Extended Protection). Returns the URL or $null.
+function Get-OnPremEwsUrl {
+    param([string]$Mailbox, [bool]$IgnoreCert)
+    if ($Mailbox -notmatch '@([^@\s]+)$') { return $null }
+    $domain = $Matches[1]
+    $body = '<?xml version="1.0" encoding="utf-8"?>' +
+        '<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">' +
+        '<Request><EMailAddress>' + $Mailbox + '</EMailAddress>' +
+        '<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>' +
+        '</Request></Autodiscover>'
+    foreach ($u in @("https://autodiscover.$domain/autodiscover/autodiscover.xml",
+                     "https://$domain/autodiscover/autodiscover.xml")) {
+        $wh = $null
+        try {
+            $wh = New-Object -ComObject 'WinHttp.WinHttpRequest.5.1'
+            $wh.Open('POST', $u, $false)
+            $wh.SetTimeouts(15000, 15000, 15000, 15000)
+            if ($IgnoreCert) { $wh.Option(4) = 13056 }
+            $wh.Option(6) = $false
+            $wh.SetRequestHeader('Content-Type', 'text/xml; charset=utf-8')
+            $wh.SetAutoLogonPolicy(0)
+            $wh.Send($body)
+            if ([int]$wh.Status -eq 200) {
+                $resp = "$($wh.ResponseText)"
+                if ($resp -match '<(?:\w+:)?EwsUrl>([^<]+)<') { return $Matches[1] }
+            }
+        } catch {} finally {
+            if ($wh) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wh) }
+        }
+    }
+    return $null
+}
+
 # Device-code sign-in for an Exchange Online EWS token (UI thread). Returns "Bearer …" or $null.
 function Get-ExoEwsToken {
     $clientId = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'   # Microsoft Office (public client)
@@ -3875,79 +3910,56 @@ function Get-ExoEwsToken {
 
 $fbForm = New-Object System.Windows.Forms.Form
 $fbForm.Text            = "Free/Busy  —  Cross-Premises Availability"
-$fbForm.ClientSize      = New-Object System.Drawing.Size(824, 470)
+$fbForm.ClientSize      = New-Object System.Drawing.Size(728, 420)
 $fbForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $fbForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
 $fbForm.MinimizeBox     = $true
 $fbForm.MaximizeBox     = $true
-$fbForm.MinimumSize     = New-Object System.Drawing.Size(660, 420)
+$fbForm.MinimumSize     = New-Object System.Drawing.Size(600, 360)
 
 $fbAnchLR = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $fbAnchTR = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
 
-$fbLblHost = New-Object System.Windows.Forms.Label
-$fbLblHost.Text = "On-Prem EWS Host"; $fbLblHost.Location = New-Object System.Drawing.Point(8, 14); $fbLblHost.Size = New-Object System.Drawing.Size(140, 20)
-$fbForm.Controls.Add($fbLblHost)
-$fbTxtHost = New-Object System.Windows.Forms.TextBox
-$fbTxtHost.Location = New-Object System.Drawing.Point(152, 11); $fbTxtHost.Size = New-Object System.Drawing.Size(500, 22); $fbTxtHost.Anchor = $fbAnchLR; $fbTxtHost.TabIndex = 0
-$fbForm.Controls.Add($fbTxtHost)
-$fbLblHostHint = New-Object System.Windows.Forms.Label
-$fbLblHostHint.Text = "(e.g. mail.contoso.com)"; $fbLblHostHint.Location = New-Object System.Drawing.Point(660, 14); $fbLblHostHint.Size = New-Object System.Drawing.Size(156, 20); $fbLblHostHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblHostHint.Anchor = $fbAnchTR
-$fbForm.Controls.Add($fbLblHostHint)
-
-$fbLblUser = New-Object System.Windows.Forms.Label
-$fbLblUser.Text = "On-Prem User"; $fbLblUser.Location = New-Object System.Drawing.Point(8, 42); $fbLblUser.Size = New-Object System.Drawing.Size(140, 20)
-$fbForm.Controls.Add($fbLblUser)
-$fbTxtUser = New-Object System.Windows.Forms.TextBox
-$fbTxtUser.Location = New-Object System.Drawing.Point(152, 39); $fbTxtUser.Size = New-Object System.Drawing.Size(240, 22); $fbTxtUser.TabIndex = 1
-$fbForm.Controls.Add($fbTxtUser)
-$fbLblPass = New-Object System.Windows.Forms.Label
-$fbLblPass.Text = "Password"; $fbLblPass.Location = New-Object System.Drawing.Point(404, 42); $fbLblPass.Size = New-Object System.Drawing.Size(70, 20)
-$fbForm.Controls.Add($fbLblPass)
-$fbTxtPass = New-Object System.Windows.Forms.TextBox
-$fbTxtPass.Location = New-Object System.Drawing.Point(480, 39); $fbTxtPass.Size = New-Object System.Drawing.Size(172, 22); $fbTxtPass.PasswordChar = [char]0x25CF; $fbTxtPass.TabIndex = 2
-$fbForm.Controls.Add($fbTxtPass)
-
 $fbLblOnp = New-Object System.Windows.Forms.Label
-$fbLblOnp.Text = "On-Prem Mailbox"; $fbLblOnp.Location = New-Object System.Drawing.Point(8, 70); $fbLblOnp.Size = New-Object System.Drawing.Size(140, 20)
+$fbLblOnp.Text = "On-Prem Mailbox"; $fbLblOnp.Location = New-Object System.Drawing.Point(8, 14); $fbLblOnp.Size = New-Object System.Drawing.Size(140, 20)
 $fbForm.Controls.Add($fbLblOnp)
 $fbTxtOnp = New-Object System.Windows.Forms.TextBox
-$fbTxtOnp.Location = New-Object System.Drawing.Point(152, 67); $fbTxtOnp.Size = New-Object System.Drawing.Size(500, 22); $fbTxtOnp.Anchor = $fbAnchLR; $fbTxtOnp.TabIndex = 3
+$fbTxtOnp.Location = New-Object System.Drawing.Point(152, 11); $fbTxtOnp.Size = New-Object System.Drawing.Size(420, 22); $fbTxtOnp.Anchor = $fbAnchLR; $fbTxtOnp.TabIndex = 0
 $fbForm.Controls.Add($fbTxtOnp)
 $fbLblOnpHint = New-Object System.Windows.Forms.Label
-$fbLblOnpHint.Text = "(target for EXO → On-Prem)"; $fbLblOnpHint.Location = New-Object System.Drawing.Point(660, 70); $fbLblOnpHint.Size = New-Object System.Drawing.Size(156, 20); $fbLblOnpHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblOnpHint.Anchor = $fbAnchTR
+$fbLblOnpHint.Text = "(on-prem user)"; $fbLblOnpHint.Location = New-Object System.Drawing.Point(580, 14); $fbLblOnpHint.Size = New-Object System.Drawing.Size(140, 20); $fbLblOnpHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblOnpHint.Anchor = $fbAnchTR
 $fbForm.Controls.Add($fbLblOnpHint)
 
 $fbLblExo = New-Object System.Windows.Forms.Label
-$fbLblExo.Text = "EXO Mailbox"; $fbLblExo.Location = New-Object System.Drawing.Point(8, 98); $fbLblExo.Size = New-Object System.Drawing.Size(140, 20)
+$fbLblExo.Text = "EXO Mailbox"; $fbLblExo.Location = New-Object System.Drawing.Point(8, 42); $fbLblExo.Size = New-Object System.Drawing.Size(140, 20)
 $fbForm.Controls.Add($fbLblExo)
 $fbTxtExo = New-Object System.Windows.Forms.TextBox
-$fbTxtExo.Location = New-Object System.Drawing.Point(152, 95); $fbTxtExo.Size = New-Object System.Drawing.Size(500, 22); $fbTxtExo.Anchor = $fbAnchLR; $fbTxtExo.TabIndex = 4
+$fbTxtExo.Location = New-Object System.Drawing.Point(152, 39); $fbTxtExo.Size = New-Object System.Drawing.Size(420, 22); $fbTxtExo.Anchor = $fbAnchLR; $fbTxtExo.TabIndex = 1
 $fbForm.Controls.Add($fbTxtExo)
 $fbLblExoHint = New-Object System.Windows.Forms.Label
-$fbLblExoHint.Text = "(target for On-Prem → EXO)"; $fbLblExoHint.Location = New-Object System.Drawing.Point(660, 98); $fbLblExoHint.Size = New-Object System.Drawing.Size(156, 20); $fbLblExoHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblExoHint.Anchor = $fbAnchTR
+$fbLblExoHint.Text = "(Exchange Online user)"; $fbLblExoHint.Location = New-Object System.Drawing.Point(580, 42); $fbLblExoHint.Size = New-Object System.Drawing.Size(140, 20); $fbLblExoHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblExoHint.Anchor = $fbAnchTR
 $fbForm.Controls.Add($fbLblExoHint)
 
 $fbChkIgnore = New-Object System.Windows.Forms.CheckBox
-$fbChkIgnore.Text = "Ignore certificate errors"; $fbChkIgnore.Location = New-Object System.Drawing.Point(152, 124); $fbChkIgnore.Size = New-Object System.Drawing.Size(220, 20); $fbChkIgnore.TabIndex = 5
+$fbChkIgnore.Text = "Ignore certificate errors"; $fbChkIgnore.Location = New-Object System.Drawing.Point(152, 68); $fbChkIgnore.Size = New-Object System.Drawing.Size(220, 20); $fbChkIgnore.TabIndex = 2
 $fbForm.Controls.Add($fbChkIgnore)
 
 $fbBtnTest = New-Object System.Windows.Forms.Button
-$fbBtnTest.Text = "Test"; $fbBtnTest.Location = New-Object System.Drawing.Point(656, 120); $fbBtnTest.Size = New-Object System.Drawing.Size(76, 26); $fbBtnTest.Anchor = $fbAnchTR; $fbBtnTest.TabIndex = 6
+$fbBtnTest.Text = "Test"; $fbBtnTest.Location = New-Object System.Drawing.Point(560, 64); $fbBtnTest.Size = New-Object System.Drawing.Size(76, 26); $fbBtnTest.Anchor = $fbAnchTR; $fbBtnTest.TabIndex = 3
 $fbForm.Controls.Add($fbBtnTest); $fbForm.AcceptButton = $fbBtnTest
 $fbBtnClose = New-Object System.Windows.Forms.Button
-$fbBtnClose.Text = "Close"; $fbBtnClose.Location = New-Object System.Drawing.Point(740, 120); $fbBtnClose.Size = New-Object System.Drawing.Size(76, 26); $fbBtnClose.Anchor = $fbAnchTR; $fbBtnClose.TabIndex = 7
+$fbBtnClose.Text = "Close"; $fbBtnClose.Location = New-Object System.Drawing.Point(644, 64); $fbBtnClose.Size = New-Object System.Drawing.Size(76, 26); $fbBtnClose.Anchor = $fbAnchTR; $fbBtnClose.TabIndex = 4
 $fbBtnClose.Add_Click({ $fbForm.Close() }); $fbForm.CancelButton = $fbBtnClose
 $fbForm.Controls.Add($fbBtnClose)
 
 $fbLvw = New-Object System.Windows.Forms.ListView
-$fbLvw.Location = New-Object System.Drawing.Point(8, 156); $fbLvw.Size = New-Object System.Drawing.Size(808, 306)
+$fbLvw.Location = New-Object System.Drawing.Point(8, 100); $fbLvw.Size = New-Object System.Drawing.Size(712, 312)
 $fbLvw.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $fbLvw.View = [System.Windows.Forms.View]::Details; $fbLvw.FullRowSelect = $true; $fbLvw.GridLines = $true; $fbLvw.ShowItemToolTips = $true
 $fbLvw.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
 [void]$fbLvw.Columns.Add("Direction", 150)
 [void]$fbLvw.Columns.Add("Result", 70)
-[void]$fbLvw.Columns.Add("Details", 580)
+[void]$fbLvw.Columns.Add("Details", 484)
 $fbLvw.Add_DoubleClick({
     if ($fbLvw.SelectedItems.Count -gt 0) {
         $it = $fbLvw.SelectedItems[0]
@@ -3958,10 +3970,8 @@ $fbLvw.Add_DoubleClick({
 })
 $fbForm.Controls.Add($fbLvw)
 
-$toolTip.SetToolTip($fbTxtHost, "External FQDN of the on-prem Exchange host serving EWS (e.g. mail.contoso.com).")
-$toolTip.SetToolTip($fbTxtUser, "On-prem account (DOMAIN\user or UPN). Leave empty to use the logged-in Windows user. Used for the On-Prem → EXO direction.")
-$toolTip.SetToolTip($fbTxtOnp,  "An on-premises mailbox SMTP address — the target queried in the EXO → On-Prem direction.")
-$toolTip.SetToolTip($fbTxtExo,  "An Exchange Online mailbox SMTP address — the target queried in the On-Prem → EXO direction.")
+$toolTip.SetToolTip($fbTxtOnp, "An on-premises mailbox SMTP address. Target for EXO → On-Prem, and its domain is used to auto-discover the on-prem EWS endpoint.")
+$toolTip.SetToolTip($fbTxtExo, "An Exchange Online mailbox SMTP address. Target for On-Prem → EXO.")
 
 # Add one result row (interpreting a probe result)
 function Add-FbRow {
@@ -4005,45 +4015,50 @@ function Add-FbSkip { param([string]$Dir, [string]$Why)
 }
 
 $fbBtnTest.Add_Click({
-    $onpHost = ($fbTxtHost.Text.Trim() -replace '^https?://', '') -replace '/.*$', ''
-    $onpUser = $fbTxtUser.Text.Trim(); $onpPass = $fbTxtPass.Text
-    $onpMbx  = $fbTxtOnp.Text.Trim();  $exoMbx  = $fbTxtExo.Text.Trim()
-    $ign     = $fbChkIgnore.Checked
-    if (-not $onpHost) {
-        [System.Windows.Forms.MessageBox]::Show("Please enter the on-prem EWS host (e.g. mail.contoso.com).", "Input Required", 0, 48) | Out-Null
-        return
-    }
-    if (-not $onpMbx -and -not $exoMbx) {
-        [System.Windows.Forms.MessageBox]::Show("Enter at least one target mailbox (on-prem and/or EXO).", "Input Required", 0, 48) | Out-Null
+    $onpMbx = $fbTxtOnp.Text.Trim()
+    $exoMbx = $fbTxtExo.Text.Trim()
+    $ign    = $fbChkIgnore.Checked
+    if (-not $onpMbx -or -not $exoMbx) {
+        [System.Windows.Forms.MessageBox]::Show("Enter both mailboxes — one on-premises and one Exchange Online.", "Input Required", 0, 48) | Out-Null
         return
     }
     $fbLvw.Items.Clear()
     $fbBtnTest.Enabled = $false
     $fbForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     try {
-        $ewsOnprem = "https://$onpHost/EWS/Exchange.asmx"
-        # Direction A: On-Prem → EXO (on-prem EWS with Windows creds, target = EXO mailbox)
-        if ($exoMbx) {
-            [System.Windows.Forms.Application]::DoEvents()
-            $rA = Invoke-FreeBusyProbe -EwsUrl $ewsOnprem -Target $exoMbx -Mode 'win' -User $onpUser -Pass $onpPass -Token '' -IgnoreCert $ign
-            Add-FbRow "On-Prem → EXO" $rA "$ewsOnprem  →  $exoMbx"
-        } else {
-            Add-FbSkip "On-Prem → EXO" "No EXO mailbox entered."
-        }
-        # Direction B: EXO → On-Prem (EXO EWS with OAuth, target = on-prem mailbox)
-        if ($onpMbx) {
+        # Auto-discover the on-prem EWS URL from the on-prem mailbox; ask if it can't be found.
+        [System.Windows.Forms.Application]::DoEvents()
+        $ewsOnprem = Get-OnPremEwsUrl -Mailbox $onpMbx -IgnoreCert $ign
+        if (-not $ewsOnprem) {
             $fbForm.Cursor = [System.Windows.Forms.Cursors]::Default
-            $tok = Get-ExoEwsToken
+            $dom = ''; if ($onpMbx -match '@([^@\s]+)$') { $dom = $Matches[1] }
+            $ans = [Microsoft.VisualBasic.Interaction]::InputBox(
+                "AutoDiscover could not determine the on-prem EWS host for $onpMbx.`r`nEnter the on-prem Exchange host (e.g. mail.contoso.com):",
+                "On-Prem EWS Host", "mail.$dom")
             $fbForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-            if ($tok) {
-                [System.Windows.Forms.Application]::DoEvents()
-                $rB = Invoke-FreeBusyProbe -EwsUrl 'https://outlook.office365.com/EWS/Exchange.asmx' -Target $onpMbx -Mode 'bearer' -User '' -Pass '' -Token $tok -IgnoreCert $ign
-                Add-FbRow "EXO → On-Prem" $rB "Exchange Online EWS  →  $onpMbx"
-            } else {
-                Add-FbSkip "EXO → On-Prem" "Exchange Online sign-in cancelled or failed."
-            }
+            $ans = ($ans -replace '^https?://', '') -replace '/.*$', ''
+            if ($ans) { $ewsOnprem = "https://$ans/EWS/Exchange.asmx" }
+        }
+
+        # Direction A: On-Prem → EXO (on-prem EWS, logged-in Windows user, target = EXO mailbox)
+        if ($ewsOnprem) {
+            [System.Windows.Forms.Application]::DoEvents()
+            $rA = Invoke-FreeBusyProbe -EwsUrl $ewsOnprem -Target $exoMbx -Mode 'win' -User '' -Pass '' -Token '' -IgnoreCert $ign
+            Add-FbRow "On-Prem → EXO" $rA "$ewsOnprem  →  $exoMbx  (as logged-in Windows user)"
         } else {
-            Add-FbSkip "EXO → On-Prem" "No on-prem mailbox entered."
+            Add-FbSkip "On-Prem → EXO" "On-prem EWS host not provided."
+        }
+
+        # Direction B: EXO → On-Prem (EXO EWS with OAuth, target = on-prem mailbox)
+        $fbForm.Cursor = [System.Windows.Forms.Cursors]::Default
+        $tok = Get-ExoEwsToken
+        $fbForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        if ($tok) {
+            [System.Windows.Forms.Application]::DoEvents()
+            $rB = Invoke-FreeBusyProbe -EwsUrl 'https://outlook.office365.com/EWS/Exchange.asmx' -Target $onpMbx -Mode 'bearer' -User '' -Pass '' -Token $tok -IgnoreCert $ign
+            Add-FbRow "EXO → On-Prem" $rB "Exchange Online EWS  →  $onpMbx"
+        } else {
+            Add-FbSkip "EXO → On-Prem" "Exchange Online sign-in cancelled or failed."
         }
     } finally {
         $fbForm.Cursor = [System.Windows.Forms.Cursors]::Default
@@ -4051,11 +4066,8 @@ $fbBtnTest.Add_Click({
     }
 })
 
-# Pre-fill from the detected UPN
-if ($upn) {
-    $fbTxtOnp.Text = $upn
-    if ($upn -match '@([^@\s]+)$') { $fbTxtHost.Text = "mail.$($Matches[1])" }
-}
+# Pre-fill the on-prem mailbox from the detected UPN
+if ($upn) { $fbTxtOnp.Text = $upn }
 #endregion
 
 #region ======================================================================
