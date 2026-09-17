@@ -2743,11 +2743,14 @@ $script:HybridTestScript = {
             $req.AllowAutoRedirect = $false
             $req.Timeout           = 20000
             $req.UserAgent         = "ExchangeMigrationTester/1.0"
-            if ($cred -is [System.Net.NetworkCredential]) {
+            if ($cred -is [System.Net.CredentialCache]) {
+                # Caller pre-selected the auth scheme(s) — use as-is.
+                $req.Credentials = $cred
+            }
+            elseif ($cred -is [System.Net.NetworkCredential]) {
                 # Bind the credential to both Windows auth schemes the endpoint
-                # offers. Negotiate lets Kerberos consume a UPN (maxm@domain);
-                # NTLM is the fallback. A CredentialCache is the correct way to
-                # supply explicit creds for these schemes.
+                # offers. A CredentialCache is the correct way to supply explicit
+                # creds for these schemes.
                 $cc = New-Object System.Net.CredentialCache
                 $u  = New-Object System.Uri($url)
                 $cc.Add($u, "Negotiate", $cred)
@@ -3070,22 +3073,38 @@ $script:HybridTestScript = {
     if (-not $abort -and -not $sync.Cancel) {
         & $setPct 72
         $who = if ($netCred) { $user } else { "logged-in user ($env:USERDOMAIN\$env:USERNAME)" }
-        # Probe via WinHTTP for both explicit and logged-in credentials — WinHTTP
-        # supplies the TLS channel-binding token, satisfying Extended Protection.
-        & $logLine "Authenticated probe as $who (WinHTTP) starting."
-        $probeUser = if ($netCred) { $user } else { '' }
-        $probePass = if ($netCred) { $pass } else { '' }
-        $r2 = & $mrsGetWinHttp $mrsUrl $probeUser $probePass $sync.IgnoreCert
-        if ($r2.Code -lt 0) {
-            & $logLine "WinHTTP probe unavailable ($($r2.Error)); falling back to .NET probe."
-            $fallbackCred = if ($netCred) { $netCred } else { 'default' }
-            $r2 = & $mrsGet $mrsUrl $fallbackCred
+        if ($netCred) {
+            # Exchange Online authenticates to the MRS proxy with NTLM (it cannot
+            # reach the on-prem KDC for Kerberos). A local client offered
+            # "Negotiate" tries Kerberos first, which can fail on an SPN
+            # misconfiguration and return 401 even though NTLM would succeed.
+            # So probe NTLM explicitly (mirrors EXO) and Negotiate separately.
+            $uriObj    = New-Object System.Uri($mrsUrl)
+            $ntlmCache = New-Object System.Net.CredentialCache
+            $ntlmCache.Add($uriObj, "NTLM", $netCred)
+            & $logLine "Authenticated probe as $who — NTLM (like Exchange Online) starting."
+            $rN = & $mrsGet $mrsUrl $ntlmCache
+            & $logLine "  NTLM: httpStatus=$($rN.Code)."
+
+            & $logLine "Authenticated probe as $who — Negotiate/Kerberos (WinHTTP) starting."
+            $rW = & $mrsGetWinHttp $mrsUrl $user $pass $sync.IgnoreCert
+            & $logLine "  Negotiate: httpStatus=$($rW.Code)."
+
+            # Prefer a success from either scheme
+            if ($rN.Code -eq 200)      { $r2 = $rN }
+            elseif ($rW.Code -eq 200)  { $r2 = $rW }
+            else                       { $r2 = @{ Code = $rN.Code; Error = "NTLM=$($rN.Code), Negotiate=$($rW.Code)" } }
+        } else {
+            & $logLine "Authenticated probe as $who (logged-in user) starting."
+            $r2 = & $mrsGetWinHttp $mrsUrl '' '' $sync.IgnoreCert
+            if ($r2.Code -lt 0) { $r2 = & $mrsGet $mrsUrl 'default' }
         }
         if ($r2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($r2.Code)." }
         if ($r2.Code -eq 200) {
-            & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — NTLM/Negotiate authentication succeeded"
+            & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — authentication succeeded"
         } elseif ($r2.Code -eq 401) {
-            & $addRow "MRS Proxy authentication" "INFO" "HTTP 401 as $who — local authenticated probe could not complete. This is expected when Extended Protection is enabled on the EWS vdir: a local diagnostic request may not satisfy TLS channel binding even with valid credentials. It does NOT mean the endpoint is broken — if the Exchange Online migration endpoint creation (or 'Verify from Exchange Online') succeeds with these credentials, the endpoint is good."
+            $detail = if ($r2.Error) { " ($($r2.Error))" } else { "" }
+            & $addRow "MRS Proxy authentication" "INFO" "HTTP 401 as $who$detail — local authenticated probe did not complete. Exchange Online authenticates with NTLM from its datacenter; a local Kerberos attempt can fail on SPN configuration. This does not by itself mean the endpoint is broken — 'Verify from Exchange Online' (Test-MigrationServerAvailability) is the authoritative check, and a successful EXO migration-endpoint creation already proves it."
         } elseif ($r2.Code -eq 403) {
             & $addRow "MRS Proxy authentication" "WARN" "HTTP 403 as $who — authenticated but access denied (check MRSProxyEnabled on the EWS vdir)"
         } elseif ($r2.Code -lt 0) {
