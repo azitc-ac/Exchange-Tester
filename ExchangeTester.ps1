@@ -1021,14 +1021,38 @@ $script:TestScript = {
 
         if ($sync.UseDeviceCode) {
             # ── Device Code Flow ──────────────────────────────────────────────
-            $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
+            # Determine the authority. The .default scope cannot be combined with
+            # the /common endpoint (AADSTS50059: no tenant-identifying info), so
+            # resolve a concrete tenant where possible and use a specific EWS
+            # delegated scope. Order: known TenantId → OIDC discovery on the
+            # e-mail domain → /organizations fallback.
+            $tenant = $sync.TenantId
+            if (-not $tenant) {
+                $dom = ($sync.Email -split '@')[1]
+                if ($dom) {
+                    try {
+                        $oidcReq = [System.Net.HttpWebRequest]::Create(
+                            "https://login.microsoftonline.com/$([Uri]::EscapeDataString($dom))/.well-known/openid-configuration")
+                        $oidcReq.Method = "GET"; $oidcReq.Timeout = 8000
+                        $oidcRp = $oidcReq.GetResponse()
+                        $oidcJ  = (New-Object System.IO.StreamReader($oidcRp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                        $oidcRp.Close()
+                        if ($oidcJ.token_endpoint -match '/([0-9a-fA-F-]{36})/') { $tenant = $Matches[1] }
+                    } catch {}
+                }
+            }
+            $authUri = if ($tenant) {
+                "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenant))/oauth2/v2.0/authorize"
+            } else {
+                'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize'
+            }
             if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
                 $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
             }
             $deviceCodeUrl = $authUri -replace '/authorize', '/devicecode'
             $tokenUrl      = $authUri -replace '/authorize', '/token'
             $clientId      = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
-            $scope         = 'https://outlook.office365.com/.default offline_access'
+            $scope         = 'https://outlook.office365.com/EWS.AccessAsUser.All offline_access'
 
             & $logLine "Modern Auth: requesting device code…"
 
