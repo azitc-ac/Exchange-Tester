@@ -2702,7 +2702,15 @@ $script:HybridTestScript = {
     }
 
     $netCred = $null
-    if ($user) { $netCred = New-Object System.Net.NetworkCredential($user, $pass) }
+    if ($user) {
+        # Split DOMAIN\user into (user, domain) so NTLM/Negotiate binds correctly;
+        # a UPN (user@domain) is passed through as-is.
+        if ($user -match '^([^\\]+)\\(.+)$') {
+            $netCred = New-Object System.Net.NetworkCredential($Matches[2], $pass, $Matches[1])
+        } else {
+            $netCred = New-Object System.Net.NetworkCredential($user, $pass)
+        }
+    }
 
     # HTTP GET → @{Code; WwwAuth; Location; Body; Error}. $cred: NetworkCredential,
     # the string 'default' (logged-in Windows user) or $null (anonymous).
@@ -3010,7 +3018,7 @@ $script:HybridTestScript = {
         if ($r2.Code -eq 200) {
             & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — NTLM/Negotiate authentication succeeded"
         } elseif ($r2.Code -eq 401) {
-            & $addRow "MRS Proxy authentication" "FAIL" "HTTP 401 as $who — credentials rejected"
+            & $addRow "MRS Proxy authentication" "FAIL" "HTTP 401 as $who — credentials rejected. Use the on-prem AD login (DOMAIN\user or the AD UPN), which often differs from the SMTP address."
         } elseif ($r2.Code -eq 403) {
             & $addRow "MRS Proxy authentication" "WARN" "HTTP 403 as $who — authenticated but access denied (check MRSProxyEnabled on the EWS vdir)"
         } elseif ($r2.Code -lt 0) {
