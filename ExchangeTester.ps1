@@ -3090,18 +3090,20 @@ $script:HybridTestScript = {
             $rW = & $mrsGetWinHttp $mrsUrl $user $pass $sync.IgnoreCert
             & $logLine "  Negotiate: httpStatus=$($rW.Code)."
 
-            # Prefer a success from either scheme
-            if ($rN.Code -eq 200)      { $r2 = $rN }
-            elseif ($rW.Code -eq 200)  { $r2 = $rW }
-            else                       { $r2 = @{ Code = $rN.Code; Error = "NTLM=$($rN.Code), Negotiate=$($rW.Code)" } }
+            # Prefer an authenticated response from either scheme. HTTP 400 counts
+            # as success here: it means auth completed and the MRS proxy processed
+            # the request but rejected the plain GET (it expects a SOAP POST).
+            if ($rN.Code -eq 200 -or $rN.Code -eq 400)      { $r2 = $rN }
+            elseif ($rW.Code -eq 200 -or $rW.Code -eq 400)  { $r2 = $rW }
+            else { $r2 = @{ Code = $rN.Code; Error = "NTLM=$($rN.Code), Negotiate=$($rW.Code)" } }
         } else {
             & $logLine "Authenticated probe as $who (logged-in user) starting."
             $r2 = & $mrsGetWinHttp $mrsUrl '' '' $sync.IgnoreCert
             if ($r2.Code -lt 0) { $r2 = & $mrsGet $mrsUrl 'default' }
         }
         if ($r2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($r2.Code)." }
-        if ($r2.Code -eq 200) {
-            & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — authentication succeeded"
+        if ($r2.Code -eq 200 -or $r2.Code -eq 400) {
+            & $addRow "MRS Proxy authentication" "OK" "HTTP $($r2.Code) as $who — authenticated successfully. The MRS proxy accepted the credentials; a GET returns $($r2.Code) because the endpoint expects a SOAP POST, which is normal and confirms the endpoint is a working MRS proxy."
         } elseif ($r2.Code -eq 401) {
             $detail = if ($r2.Error) { " ($($r2.Error))" } else { "" }
             & $addRow "MRS Proxy authentication" "INFO" "HTTP 401 as $who$detail — both NTLM and Negotiate were rejected by a local probe. This tests plain Windows auth, which may not match how Exchange Online reached the endpoint (different source/trust or credential path). It does not by itself mean the endpoint or your migration is broken. Authoritative check: 'Verify from Exchange Online' (Test-MigrationServerAvailability) — a successful EXO migration-endpoint creation already confirms it. Tip: browse the EWS URL and sign in with the same account to see whether it can do Windows auth at all."
