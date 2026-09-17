@@ -708,38 +708,14 @@ $script:TestScript = {
 
         if ($sync.UseDeviceCode) {
             # ── Device Code Flow ──────────────────────────────────────────────
-            # Determine the authority. The .default scope cannot be combined with
-            # the /common endpoint (AADSTS50059: no tenant-identifying info), so
-            # resolve a concrete tenant where possible and use a specific EWS
-            # delegated scope. Order: known TenantId → OIDC discovery on the
-            # e-mail domain → /organizations fallback.
-            $tenant = $sync.TenantId
-            if (-not $tenant) {
-                $dom = ($sync.Email -split '@')[1]
-                if ($dom) {
-                    try {
-                        $oidcReq = [System.Net.HttpWebRequest]::Create(
-                            "https://login.microsoftonline.com/$([Uri]::EscapeDataString($dom))/.well-known/openid-configuration")
-                        $oidcReq.Method = "GET"; $oidcReq.Timeout = 8000
-                        $oidcRp = $oidcReq.GetResponse()
-                        $oidcJ  = (New-Object System.IO.StreamReader($oidcRp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
-                        $oidcRp.Close()
-                        if ($oidcJ.token_endpoint -match '/([0-9a-fA-F-]{36})/') { $tenant = $Matches[1] }
-                    } catch {}
-                }
-            }
-            $authUri = if ($tenant) {
-                "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenant))/oauth2/v2.0/authorize"
-            } else {
-                'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize'
-            }
+            $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
             if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
                 $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
             }
             $deviceCodeUrl = $authUri -replace '/authorize', '/devicecode'
             $tokenUrl      = $authUri -replace '/authorize', '/token'
             $clientId      = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
-            $scope         = 'https://outlook.office365.com/EWS.AccessAsUser.All offline_access'
+            $scope         = 'https://outlook.office365.com/.default offline_access'
 
             & $logLine "Modern Auth: requesting device code…"
 
@@ -2428,7 +2404,940 @@ $form.Add_FormClosing({
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 })
 
+#region ======================================================================
+#  HYBRID DEPLOYMENT TEST  (Migration Endpoint / MRS Proxy)
 #==============================================================================
+
+$hybForm = New-Object System.Windows.Forms.Form
+$hybForm.Text            = "Hybrid Deployment  —  Migration Endpoint (MRS Proxy)"
+$hybForm.ClientSize      = New-Object System.Drawing.Size(775, 595)
+$hybForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$hybForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+$hybForm.MaximizeBox     = $false
+$hybForm.MinimizeBox     = $true
+
+#region --- Row 1: On-prem mailbox ---
+$hybLblEmail = New-Object System.Windows.Forms.Label
+$hybLblEmail.Text      = "On-Prem Mailbox"
+$hybLblEmail.Location  = New-Object System.Drawing.Point(8, 14)
+$hybLblEmail.Size      = New-Object System.Drawing.Size(128, 20)
+$hybLblEmail.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hybForm.Controls.Add($hybLblEmail)
+
+$hybTxtEmail = New-Object System.Windows.Forms.TextBox
+$hybTxtEmail.Location = New-Object System.Drawing.Point(140, 11)
+$hybTxtEmail.Size     = New-Object System.Drawing.Size(622, 22)
+$hybTxtEmail.TabIndex = 0
+$hybForm.Controls.Add($hybTxtEmail)
+#endregion
+
+#region --- Row 2: MRS endpoint FQDN ---
+$hybLblFqdn = New-Object System.Windows.Forms.Label
+$hybLblFqdn.Text      = "MRS Endpoint (FQDN)"
+$hybLblFqdn.Location  = New-Object System.Drawing.Point(8, 42)
+$hybLblFqdn.Size      = New-Object System.Drawing.Size(128, 20)
+$hybLblFqdn.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hybForm.Controls.Add($hybLblFqdn)
+
+$hybTxtFqdn = New-Object System.Windows.Forms.TextBox
+$hybTxtFqdn.Location = New-Object System.Drawing.Point(140, 39)
+$hybTxtFqdn.Size     = New-Object System.Drawing.Size(340, 22)
+$hybTxtFqdn.TabIndex = 1
+$hybForm.Controls.Add($hybTxtFqdn)
+
+$hybLblFqdnHint = New-Object System.Windows.Forms.Label
+$hybLblFqdnHint.Text      = "(leave empty to discover via AutoDiscover)"
+$hybLblFqdnHint.Location  = New-Object System.Drawing.Point(486, 42)
+$hybLblFqdnHint.Size      = New-Object System.Drawing.Size(276, 20)
+$hybLblFqdnHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hybLblFqdnHint.ForeColor = [System.Drawing.Color]::Gray
+$hybForm.Controls.Add($hybLblFqdnHint)
+#endregion
+
+#region --- Row 3: On-prem credentials ---
+$hybLblUser = New-Object System.Windows.Forms.Label
+$hybLblUser.Text      = "On-Prem User"
+$hybLblUser.Location  = New-Object System.Drawing.Point(8, 70)
+$hybLblUser.Size      = New-Object System.Drawing.Size(128, 20)
+$hybLblUser.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hybForm.Controls.Add($hybLblUser)
+
+$hybTxtUser = New-Object System.Windows.Forms.TextBox
+$hybTxtUser.Location = New-Object System.Drawing.Point(140, 67)
+$hybTxtUser.Size     = New-Object System.Drawing.Size(240, 22)
+$hybTxtUser.TabIndex = 2
+$hybForm.Controls.Add($hybTxtUser)
+
+$hybLblPass = New-Object System.Windows.Forms.Label
+$hybLblPass.Text      = "Password"
+$hybLblPass.Location  = New-Object System.Drawing.Point(390, 70)
+$hybLblPass.Size      = New-Object System.Drawing.Size(70, 20)
+$hybLblPass.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hybForm.Controls.Add($hybLblPass)
+
+$hybTxtPass = New-Object System.Windows.Forms.TextBox
+$hybTxtPass.Location     = New-Object System.Drawing.Point(466, 67)
+$hybTxtPass.Size         = New-Object System.Drawing.Size(180, 22)
+$hybTxtPass.PasswordChar = [char]0x25CF   # ●
+$hybTxtPass.TabIndex     = 3
+$hybForm.Controls.Add($hybTxtPass)
+#endregion
+
+#region --- Row 4: options + buttons ---
+$hybChkIgnoreCert = New-Object System.Windows.Forms.CheckBox
+$hybChkIgnoreCert.Text     = "Ignore certificate errors"
+$hybChkIgnoreCert.Location = New-Object System.Drawing.Point(8, 96)
+$hybChkIgnoreCert.Size     = New-Object System.Drawing.Size(200, 20)
+$hybChkIgnoreCert.Checked  = $false
+$hybChkIgnoreCert.TabIndex = 4
+$hybForm.Controls.Add($hybChkIgnoreCert)
+
+$hybChkExo = New-Object System.Windows.Forms.CheckBox
+$hybChkExo.Text     = "Verify from Exchange Online"
+$hybChkExo.Location = New-Object System.Drawing.Point(240, 96)
+$hybChkExo.Size     = New-Object System.Drawing.Size(370, 20)
+$hybChkExo.Checked  = $false
+$hybChkExo.TabIndex = 5
+$hybForm.Controls.Add($hybChkExo)
+
+$hybBtnTest = New-Object System.Windows.Forms.Button
+$hybBtnTest.Text     = "Test"
+$hybBtnTest.Location = New-Object System.Drawing.Point(620, 92)
+$hybBtnTest.Size     = New-Object System.Drawing.Size(68, 26)
+$hybBtnTest.TabIndex = 6
+$hybForm.Controls.Add($hybBtnTest)
+$hybForm.AcceptButton = $hybBtnTest
+
+$hybBtnCancel = New-Object System.Windows.Forms.Button
+$hybBtnCancel.Text     = "Cancel"
+$hybBtnCancel.Location = New-Object System.Drawing.Point(696, 92)
+$hybBtnCancel.Size     = New-Object System.Drawing.Size(68, 26)
+$hybBtnCancel.Enabled  = $false
+$hybBtnCancel.TabIndex = 7
+$hybForm.Controls.Add($hybBtnCancel)
+
+$toolTip.SetToolTip($hybTxtEmail, "Primary SMTP address of an on-premises mailbox. Used for AutoDiscover-based endpoint discovery when the FQDN field is empty.")
+$toolTip.SetToolTip($hybTxtFqdn,  "External FQDN of the on-prem MRS endpoint, e.g. mail.contoso.com (the host serving /EWS/mrsproxy.svc). Leave empty to discover it via AutoDiscover.")
+$toolTip.SetToolTip($hybTxtUser,  "On-premises account, DOMAIN\user or UPN. Leave empty to use the logged-in Windows user (local probes only).")
+$toolTip.SetToolTip($hybChkExo,   "Additionally run Test-MigrationServerAvailability inside Exchange Online (AdminAPI, device code sign-in as an Exchange admin). This is the only check that proves Microsoft's datacenter can reach the endpoint.")
+#endregion
+
+#region --- Separator + progress bar + tabs ---
+$hybPnlSep = New-Object System.Windows.Forms.Panel
+$hybPnlSep.Location  = New-Object System.Drawing.Point(0, 126)
+$hybPnlSep.Size      = New-Object System.Drawing.Size(775, 2)
+$hybPnlSep.BackColor = [System.Drawing.SystemColors]::ControlDark
+$hybForm.Controls.Add($hybPnlSep)
+
+$hybPrgBar = New-Object System.Windows.Forms.ProgressBar
+$hybPrgBar.Location = New-Object System.Drawing.Point(8, 134)
+$hybPrgBar.Size     = New-Object System.Drawing.Size(757, 14)
+$hybPrgBar.Minimum  = 0
+$hybPrgBar.Maximum  = 100
+$hybForm.Controls.Add($hybPrgBar)
+
+$hybTabCtrl = New-Object System.Windows.Forms.TabControl
+$hybTabCtrl.Location = New-Object System.Drawing.Point(8, 157)
+$hybTabCtrl.Size     = New-Object System.Drawing.Size(757, 429)
+$hybForm.Controls.Add($hybTabCtrl)
+
+$hybTabResults = New-Object System.Windows.Forms.TabPage
+$hybTabResults.Text = "Results"
+$hybTabCtrl.Controls.Add($hybTabResults)
+
+$hybLvwResults = New-Object System.Windows.Forms.ListView
+$hybLvwResults.Dock          = [System.Windows.Forms.DockStyle]::Fill
+$hybLvwResults.View          = [System.Windows.Forms.View]::Details
+$hybLvwResults.FullRowSelect = $true
+$hybLvwResults.GridLines     = $true
+$hybLvwResults.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+[void]$hybLvwResults.Columns.Add("Step",    220)
+[void]$hybLvwResults.Columns.Add("Result",   70)
+[void]$hybLvwResults.Columns.Add("Details", 440)
+$hybTabResults.Controls.Add($hybLvwResults)
+
+$hybTabLog = New-Object System.Windows.Forms.TabPage
+$hybTabLog.Text = "Log"
+$hybTabCtrl.Controls.Add($hybTabLog)
+
+$hybRtbLog = New-Object System.Windows.Forms.RichTextBox
+$hybRtbLog.Dock       = [System.Windows.Forms.DockStyle]::Fill
+$hybRtbLog.ReadOnly   = $true
+$hybRtbLog.Font       = New-Object System.Drawing.Font("Consolas", 9)
+$hybRtbLog.BackColor  = [System.Drawing.Color]::White
+$hybRtbLog.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::Vertical
+$hybRtbLog.WordWrap   = $true
+$hybTabLog.Controls.Add($hybRtbLog)
+
+$ctxHybLog = New-Object System.Windows.Forms.ContextMenuStrip
+$miHybCopy = New-Object System.Windows.Forms.ToolStripMenuItem("Copy")
+$miHybCopy.ShortcutKeyDisplayString = "Ctrl+C"
+$miHybSelAll = New-Object System.Windows.Forms.ToolStripMenuItem("Select All")
+$miHybSelAll.ShortcutKeyDisplayString = "Ctrl+A"
+$miHybClear = New-Object System.Windows.Forms.ToolStripMenuItem("Clear Log")
+[void]$ctxHybLog.Items.Add($miHybCopy)
+[void]$ctxHybLog.Items.Add($miHybSelAll)
+[void]$ctxHybLog.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$ctxHybLog.Items.Add($miHybClear)
+$hybRtbLog.ContextMenuStrip = $ctxHybLog
+
+$miHybCopy.Add_Click({
+    $t = $hybRtbLog.SelectedText
+    if (-not $t) { $t = $hybRtbLog.Text }
+    if ($t) { [System.Windows.Forms.Clipboard]::SetText($t) }
+})
+$miHybSelAll.Add_Click({ $hybRtbLog.SelectAll() })
+$miHybClear.Add_Click({ $hybRtbLog.Clear() })
+#endregion
+
+# Script-level state for the currently running hybrid test
+$script:HybPS        = $null
+$script:HybRS        = $null
+$script:HybSync      = $null
+$script:HybPollTimer = $null
+
+# The hybrid test logic runs inside a dedicated PS runspace (same pattern as
+# the AutoDiscover test). $sync is the only bridge to the UI thread.
+$script:HybridTestScript = {
+    param($sync)
+
+    $email  = $sync.Email
+    $fqdn   = $sync.Fqdn
+    $user   = $sync.User
+    $pass   = $sync.Password
+    $runExo = $sync.RunExo
+    $domain = if ($email -match '@') { ($email -split '@')[1] } else { $null }
+
+    $logLine = { param([string]$msg) $sync.Queue.Enqueue($msg) }
+    $setPct  = { param([int]$pct)    $sync.Pct = $pct }
+    $addRow  = {
+        param([string]$step, [string]$result, [string]$details)
+        if ($result -eq 'FAIL') { $sync.Failed = $true }
+        $sync.RowQueue.Enqueue(@{ Step = $step; Result = $result; Details = $details })
+    }
+
+    [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.SecurityProtocolType]::Tls12 -bor
+        [System.Net.SecurityProtocolType]::Tls11 -bor
+        [System.Net.SecurityProtocolType]::Tls
+    if ($sync.IgnoreCert) {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    }
+
+    $netCred = $null
+    if ($user) { $netCred = New-Object System.Net.NetworkCredential($user, $pass) }
+
+    # HTTP GET → @{Code; WwwAuth; Location; Body; Error}. $cred: NetworkCredential,
+    # the string 'default' (logged-in Windows user) or $null (anonymous).
+    $mrsGet = {
+        param([string]$url, $cred)
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($url)
+            $req.Method            = "GET"
+            $req.AllowAutoRedirect = $false
+            $req.Timeout           = 20000
+            $req.UserAgent         = "ExchangeMigrationTester/1.0"
+            if ($cred -is [System.Net.NetworkCredential]) { $req.Credentials = $cred }
+            elseif ($cred -eq 'default')                  { $req.UseDefaultCredentials = $true }
+            try {
+                $rp   = $req.GetResponse()
+                $code = [int]$rp.StatusCode
+                $rdr  = New-Object System.IO.StreamReader($rp.GetResponseStream())
+                $body = $rdr.ReadToEnd(); $rdr.Close()
+                $rp.Close()
+                return @{ Code = $code; WwwAuth = $null; Location = $null; Body = $body; Error = $null }
+            } catch [System.Net.WebException] {
+                $ex = $_.Exception
+                if ($ex.Response) {
+                    $code = [int]$ex.Response.StatusCode
+                    $wa   = try { ($ex.Response.Headers.GetValues("WWW-Authenticate")) -join ', ' } catch { $null }
+                    $loc  = $ex.Response.Headers["Location"]
+                    $ex.Response.Close()
+                    return @{ Code = $code; WwwAuth = $wa; Location = $loc; Body = $null; Error = $null }
+                }
+                return @{ Code = -1; WwwAuth = $null; Location = $null; Body = $null; Error = $ex.Message }
+            }
+        } catch {
+            return @{ Code = -1; WwwAuth = $null; Location = $null; Body = $null; Error = $_.Exception.Message }
+        }
+    }
+
+    $abort = $false
+
+    # ── Step 1: Endpoint discovery via AutoDiscover (when no FQDN given) ──────
+    if (-not $fqdn -and -not $sync.Cancel) {
+        & $setPct 5
+        & $logLine "Endpoint discovery via AutoDiscover for $domain starting."
+
+        $adXml   = "<?xml version=""1.0"" encoding=""utf-8""?>" +
+            "<Autodiscover xmlns=""http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006"">" +
+            "<Request><EMailAddress>$email</EMailAddress>" +
+            "<AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema>" +
+            "</Request></Autodiscover>"
+        $adBytes = [System.Text.Encoding]::UTF8.GetBytes($adXml)
+
+        $doAdPost = {
+            param([string]$url)
+            try {
+                $req = [System.Net.HttpWebRequest]::Create($url)
+                $req.Method            = "POST"
+                $req.ContentType       = "text/xml; charset=utf-8"
+                $req.ContentLength     = $adBytes.Length
+                $req.AllowAutoRedirect = $false
+                $req.Timeout           = 20000
+                $req.UserAgent         = "Microsoft Office/16.0 (Windows NT 10.0)"
+                if ($netCred) { $req.Credentials = $netCred } else { $req.UseDefaultCredentials = $true }
+                $s = $req.GetRequestStream(); $s.Write($adBytes, 0, $adBytes.Length); $s.Close()
+                try {
+                    $resp = $req.GetResponse()
+                    $code = [int]$resp.StatusCode
+                    $body = $null
+                    if ($code -eq 200) {
+                        $rdr = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+                        $body = $rdr.ReadToEnd(); $rdr.Close()
+                    }
+                    $loc = $resp.Headers["Location"]
+                    $resp.Close()
+                    return @{ Code = $code; Body = $body; Location = $loc; Error = $null }
+                } catch [System.Net.WebException] {
+                    $ex = $_.Exception
+                    if ($ex.Response) {
+                        $code = [int]$ex.Response.StatusCode
+                        $loc  = $ex.Response.Headers["Location"]
+                        $ex.Response.Close()
+                        return @{ Code = $code; Body = $null; Location = $loc; Error = $null }
+                    }
+                    return @{ Code = -1; Body = $null; Location = $null; Error = $ex.Message }
+                }
+            } catch {
+                return @{ Code = -1; Body = $null; Location = $null; Error = $_.Exception.Message }
+            }
+        }
+
+        $adBody = $null
+        foreach ($u in @("https://autodiscover.$domain/autodiscover/autodiscover.xml",
+                         "https://$domain/autodiscover/autodiscover.xml")) {
+            if ($sync.Cancel) { break }
+            & $logLine "AutoDiscover via $u starting."
+            $res = & $doAdPost $u
+            if ($res.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res.Code)." }
+            else                 { & $logLine "AutoDiscover via $u failed: $($res.Error)" }
+            if ($res.Code -eq 200 -and $res.Body) { $adBody = $res.Body; break }
+            if (($res.Code -eq 301 -or $res.Code -eq 302) -and $res.Location -match '^https://') {
+                & $logLine "Redirect to $($res.Location)."
+                $res2 = & $doAdPost $res.Location
+                if ($res2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($res2.Code)." }
+                if ($res2.Code -eq 200 -and $res2.Body) { $adBody = $res2.Body; break }
+            }
+        }
+
+        if ($adBody) {
+            try {
+                $xd  = [xml]$adBody
+                $nsm = New-Object System.Xml.XmlNamespaceManager($xd.NameTable)
+                $nsm.AddNamespace("ad", "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a")
+                $ews = $null; $src = ''
+                # Prefer the external (EXPR) EWS URL — that host is the MRS endpoint
+                foreach ($want in @('EXPR', 'EXCH')) {
+                    foreach ($proto in $xd.SelectNodes("//ad:Protocol", $nsm)) {
+                        $tn = $proto.SelectSingleNode("ad:Type", $nsm)
+                        if ($tn -and $tn.InnerText -eq $want) {
+                            $n = $proto.SelectSingleNode("ad:EwsUrl", $nsm)
+                            if ($n -and $n.InnerText) { $ews = $n.InnerText.Trim(); $src = $want; break }
+                        }
+                    }
+                    if ($ews) { break }
+                }
+                if (-not $ews) {
+                    $n = $xd.SelectSingleNode("//ad:EwsUrl", $nsm)
+                    if ($n -and $n.InnerText) { $ews = $n.InnerText.Trim(); $src = 'first found' }
+                }
+                if ($ews) {
+                    $fqdn = ([Uri]$ews).Host
+                    & $logLine "EWS URL ($src): $ews"
+                    & $addRow "Endpoint discovery" "OK" "$fqdn (from $src EWS URL: $ews)"
+                }
+            } catch {
+                & $logLine "AutoDiscover XML parse error: $($_.Exception.Message)"
+            }
+        }
+        if (-not $fqdn) {
+            & $addRow "Endpoint discovery" "FAIL" "AutoDiscover returned no usable EWS URL — enter the MRS endpoint FQDN manually"
+            $abort = $true
+        }
+    }
+
+    # ── Step 2: DNS resolution ────────────────────────────────────────────────
+    if (-not $abort -and -not $sync.Cancel) {
+        & $setPct 25
+        & $logLine ""
+        & $logLine "DNS resolution for $fqdn starting."
+        try {
+            $ips = [System.Net.Dns]::GetHostAddresses($fqdn) | ForEach-Object { $_.IPAddressToString }
+            & $logLine "DNS: $($ips -join ', ')"
+            & $addRow "DNS resolution" "OK" ($ips -join ', ')
+        } catch {
+            & $addRow "DNS resolution" "FAIL" $_.Exception.Message
+            $abort = $true
+        }
+    }
+
+    # ── Step 3: TCP 443 ───────────────────────────────────────────────────────
+    if (-not $abort -and -not $sync.Cancel) {
+        & $setPct 35
+        & $logLine "TCP connect to $fqdn`:443 starting."
+        try {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            if (-not $tcp.ConnectAsync($fqdn, 443).Wait(10000)) {
+                $tcp.Close()
+                throw "Connection timed out (10 s)"
+            }
+            $tcp.Close()
+            & $logLine "TCP 443: connected."
+            & $addRow "TCP port 443" "OK" "Connected"
+        } catch {
+            $m = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+            & $addRow "TCP port 443" "FAIL" $m
+            $abort = $true
+        }
+    }
+
+    # ── Step 4: TLS handshake + certificate inspection ────────────────────────
+    # EXO only connects to migration endpoints with a publicly trusted, valid,
+    # name-matching certificate — so this is checked explicitly, independent of
+    # the "Ignore certificate errors" option (which only affects the HTTP probes).
+    if (-not $abort -and -not $sync.Cancel) {
+        & $setPct 48
+        & $logLine "TLS handshake with $fqdn`:443 starting."
+        $cert2 = $null; $sslProto = ''
+        try {
+            $tcp2 = New-Object System.Net.Sockets.TcpClient
+            if (-not $tcp2.ConnectAsync($fqdn, 443).Wait(10000)) { $tcp2.Close(); throw "TCP connect timeout" }
+            # Accept-all callback: the handshake must succeed so the certificate
+            # can be captured; trust and name are validated manually below.
+            $ssl = New-Object System.Net.Security.SslStream($tcp2.GetStream(), $false, { $true })
+            $ssl.AuthenticateAsClient($fqdn)
+            $sslProto = $ssl.SslProtocol.ToString()
+            $cert2 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
+            $ssl.Dispose(); $tcp2.Close()
+        } catch {
+            $m = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+            & $logLine "TLS handshake failed: $m"
+            & $addRow "TLS handshake" "FAIL" $m
+            $abort = $true
+        }
+
+        if ($cert2) {
+            & $logLine "TLS: $sslProto"
+            & $logLine "Certificate subject: $($cert2.Subject)"
+            & $logLine "Certificate issuer:  $($cert2.Issuer)"
+            & $logLine "Certificate valid:   $($cert2.NotBefore.ToString('yyyy-MM-dd')) - $($cert2.NotAfter.ToString('yyyy-MM-dd'))"
+            & $addRow "TLS handshake" "OK" "$sslProto — $($cert2.Subject)"
+
+            # Trust chain (revocation not checked to stay fast/offline-capable)
+            $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+            $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+            $chainOk  = $chain.Build($cert2)
+            $chainErr = @($chain.ChainStatus | ForEach-Object { $_.Status.ToString() }) -join ', '
+            & $logLine "Certificate chain: $(if ($chainOk) { 'valid' } else { $chainErr })"
+            if ($chainOk) {
+                & $addRow "Certificate trust" "OK" "Chain valid (issuer: $($cert2.Issuer))"
+            } else {
+                & $addRow "Certificate trust" "FAIL" "$chainErr — Exchange Online requires a publicly trusted certificate on the MRS endpoint"
+            }
+
+            # Name match against SAN entries (with wildcard support)
+            $sanNames = @()
+            foreach ($ext in $cert2.Extensions) {
+                if ($ext.Oid.Value -eq '2.5.29.17') {
+                    # Format() output is localized ("DNS Name=", "DNS-Name=", ...) —
+                    # extract hostname-shaped tokens instead of parsing labels
+                    $sanNames = @([regex]::Matches($ext.Format($false), '(?i)((?:\*\.)?(?:[a-z0-9\-]+\.)+[a-z0-9\-]{2,})') |
+                        ForEach-Object { $_.Groups[1].Value })
+                }
+            }
+            if ($sanNames.Count -eq 0 -and $cert2.Subject -match 'CN=([^,]+)') { $sanNames = @($Matches[1].Trim()) }
+            $nameMatch = $false
+            foreach ($n in $sanNames) {
+                if ($n -ieq $fqdn) { $nameMatch = $true; break }
+                if ($n.StartsWith('*.')) {
+                    $suffix = $n.Substring(1)   # ".contoso.com"
+                    if ($fqdn.Length -gt $suffix.Length -and
+                        $fqdn.EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        $fqdn.Substring(0, $fqdn.Length - $suffix.Length) -notmatch '\.') {
+                        $nameMatch = $true; break
+                    }
+                }
+            }
+            & $logLine "Certificate names:   $($sanNames -join ', ')"
+            if ($nameMatch) {
+                & $addRow "Certificate name match" "OK" "$fqdn is covered ($($sanNames -join ', '))"
+            } else {
+                & $addRow "Certificate name match" "FAIL" "$fqdn not in certificate names: $($sanNames -join ', ')"
+            }
+
+            # Validity period
+            $daysLeft = [int]($cert2.NotAfter - (Get-Date)).TotalDays
+            if ((Get-Date) -lt $cert2.NotBefore -or $daysLeft -lt 0) {
+                & $addRow "Certificate validity" "FAIL" "Not valid: $($cert2.NotBefore.ToString('yyyy-MM-dd')) - $($cert2.NotAfter.ToString('yyyy-MM-dd'))"
+            } elseif ($daysLeft -lt 30) {
+                & $addRow "Certificate validity" "WARN" "Expires in $daysLeft day(s): $($cert2.NotAfter.ToString('yyyy-MM-dd'))"
+            } else {
+                & $addRow "Certificate validity" "OK" "Valid until $($cert2.NotAfter.ToString('yyyy-MM-dd')) ($daysLeft days left)"
+            }
+        }
+    }
+
+    # ── Step 5: MRS Proxy endpoint (unauthenticated challenge) ────────────────
+    $mrsUrl = "https://$fqdn/EWS/mrsproxy.svc"
+    if (-not $abort -and -not $sync.Cancel) {
+        & $setPct 62
+        & $logLine ""
+        & $logLine "Probing MRS Proxy endpoint: $mrsUrl"
+        $r = & $mrsGet $mrsUrl $null
+        if ($r.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($r.Code)." }
+        if ($r.Code -eq 401) {
+            $wa = if ($r.WwwAuth) { $r.WwwAuth } else { '(no WWW-Authenticate header)' }
+            & $logLine "  WWW-Authenticate: $wa"
+            if ($r.WwwAuth -match 'Negotiate|NTLM') {
+                & $addRow "MRS Proxy endpoint" "OK" "Published — 401 challenge offers: $wa"
+            } else {
+                & $addRow "MRS Proxy endpoint" "WARN" "401 without Negotiate/NTLM ($wa) — EXO migration endpoints authenticate via NTLM/Negotiate"
+            }
+        } elseif ($r.Code -eq 404) {
+            & $addRow "MRS Proxy endpoint" "FAIL" "HTTP 404 — mrsproxy.svc not found under /EWS. Check external EWS publishing and MRSProxyEnabled (Set-WebServicesVirtualDirectory -MRSProxyEnabled `$true)"
+        } elseif ($r.Code -eq 403) {
+            & $addRow "MRS Proxy endpoint" "FAIL" "HTTP 403 — access blocked. MRS Proxy may be disabled on the EWS virtual directory, or a reverse proxy is filtering the path"
+        } elseif ($r.Code -eq 503) {
+            & $addRow "MRS Proxy endpoint" "FAIL" "HTTP 503 — service unavailable (EWS app pool stopped or backend down)"
+        } elseif ($r.Code -eq 200) {
+            & $addRow "MRS Proxy endpoint" "WARN" "HTTP 200 without authentication — unusual, the endpoint should challenge with 401"
+        } elseif ($r.Code -ge 300 -and $r.Code -lt 400) {
+            & $addRow "MRS Proxy endpoint" "WARN" "HTTP $($r.Code) redirect to $($r.Location) — EXO does not follow redirects on the MRS endpoint"
+        } elseif ($r.Code -lt 0) {
+            & $addRow "MRS Proxy endpoint" "FAIL" $r.Error
+            $abort = $true
+        } else {
+            & $addRow "MRS Proxy endpoint" "WARN" "HTTP $($r.Code) — unexpected response"
+        }
+    }
+
+    # ── Step 6: MRS Proxy authenticated probe ─────────────────────────────────
+    if (-not $abort -and -not $sync.Cancel) {
+        & $setPct 72
+        $who = if ($netCred) { $user } else { "logged-in user ($env:USERDOMAIN\$env:USERNAME)" }
+        $credForProbe = if ($netCred) { $netCred } else { 'default' }
+        & $logLine "Authenticated probe as $who starting."
+        $r2 = & $mrsGet $mrsUrl $credForProbe
+        if ($r2.Code -ge 0) { & $logLine "GetLastError=0; httpStatus=$($r2.Code)." }
+        if ($r2.Code -eq 200) {
+            & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — NTLM/Negotiate authentication succeeded"
+        } elseif ($r2.Code -eq 401) {
+            & $addRow "MRS Proxy authentication" "FAIL" "HTTP 401 as $who — credentials rejected"
+        } elseif ($r2.Code -eq 403) {
+            & $addRow "MRS Proxy authentication" "WARN" "HTTP 403 as $who — authenticated but access denied (check MRSProxyEnabled on the EWS vdir)"
+        } elseif ($r2.Code -lt 0) {
+            & $addRow "MRS Proxy authentication" "FAIL" $r2.Error
+        } else {
+            & $addRow "MRS Proxy authentication" "WARN" "HTTP $($r2.Code) as $who — unexpected response"
+        }
+    }
+
+    # ── Step 7 (optional): Test-MigrationServerAvailability from EXO ──────────
+    # Runs the real cmdlet inside Exchange Online via the AdminAPI (the same REST
+    # endpoint the EXO V3 module uses) — the only check that proves Microsoft's
+    # datacenter can reach the on-prem endpoint.
+    if ($runExo -and -not $abort -and -not $sync.Cancel) {
+        & $setPct 80
+        & $logLine ""
+        & $logLine "Exchange Online verification (Test-MigrationServerAvailability):"
+
+        $clientId = 'fb78d390-0c51-40cd-8e17-fdbfab77341b'   # 'Microsoft Exchange REST API Based Powershell' public client
+        $scope    = 'https://outlook.office365.com/.default offline_access'
+        $dcUrl    = 'https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode'
+        $tokenUrl = 'https://login.microsoftonline.com/organizations/oauth2/v2.0/token'
+
+        & $logLine "EXO: requesting device code…"
+        $dcJson = $null
+        try {
+            $dcBytes = [System.Text.Encoding]::UTF8.GetBytes(
+                "client_id=$([Uri]::EscapeDataString($clientId))&scope=$([Uri]::EscapeDataString($scope))")
+            $rq = [System.Net.HttpWebRequest]::Create($dcUrl)
+            $rq.Method = "POST"; $rq.ContentType = "application/x-www-form-urlencoded"
+            $rq.ContentLength = $dcBytes.Length; $rq.Timeout = 15000
+            $ss = $rq.GetRequestStream(); $ss.Write($dcBytes, 0, $dcBytes.Length); $ss.Close()
+            $rp = $rq.GetResponse()
+            $dcJson = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+            $rp.Close()
+        } catch {
+            & $logLine "EXO: device code request failed — $($_.Exception.Message)"
+        }
+
+        $exoToken = $null
+        if ($dcJson) {
+            $userCode   = $dcJson.user_code
+            $deviceCode = $dcJson.device_code
+            $verifyUri  = if ($dcJson.verification_uri) { $dcJson.verification_uri } else { $dcJson.verification_url }
+            $pollSec    = [int]$dcJson.interval; if ($pollSec -lt 5) { $pollSec = 5 }
+            & $logLine "EXO: visit $verifyUri — enter code: $userCode  (sign in as an Exchange admin)"
+
+            $sync.DeviceToken  = $null
+            $sync.DeviceError  = $null
+            $sync.DeviceCancel = $false
+
+            $dcForm = New-Object System.Windows.Forms.Form
+            $dcForm.Text            = "Sign in to Microsoft  —  Exchange Online"
+            $dcForm.Size            = New-Object System.Drawing.Size(440, 210)
+            $dcForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+            $dcForm.MinimizeBox     = $false
+            $dcForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+
+            $lbl1 = New-Object System.Windows.Forms.Label
+            $lbl1.Text     = "1.  Open a browser and go to:"
+            $lbl1.Location = New-Object System.Drawing.Point(12, 14)
+            $lbl1.AutoSize = $true
+
+            $lnk = New-Object System.Windows.Forms.LinkLabel
+            $lnk.Text     = $verifyUri
+            $lnk.Location = New-Object System.Drawing.Point(28, 34)
+            $lnk.AutoSize = $true
+            $lnk.Add_LinkClicked({ [System.Diagnostics.Process]::Start($lnk.Text) })
+
+            $lbl2 = New-Object System.Windows.Forms.Label
+            $lbl2.Text     = "2.  Enter this code (sign in as an Exchange admin):"
+            $lbl2.Location = New-Object System.Drawing.Point(12, 62)
+            $lbl2.AutoSize = $true
+
+            $lblCode = New-Object System.Windows.Forms.Label
+            $lblCode.Text      = $userCode
+            $lblCode.Font      = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold)
+            $lblCode.Location  = New-Object System.Drawing.Point(28, 80)
+            $lblCode.AutoSize  = $true
+            $lblCode.ForeColor = [System.Drawing.Color]::DarkBlue
+
+            $btnCopy = New-Object System.Windows.Forms.Button
+            $btnCopy.Text     = "Copy"
+            $btnCopy.Location = New-Object System.Drawing.Point(340, 82)
+            $btnCopy.Size     = New-Object System.Drawing.Size(72, 26)
+            $btnCopy.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($userCode) })
+
+            $lblWait = New-Object System.Windows.Forms.Label
+            $lblWait.Text      = "Waiting for sign-in…"
+            $lblWait.Location  = New-Object System.Drawing.Point(12, 144)
+            $lblWait.AutoSize  = $true
+            $lblWait.ForeColor = [System.Drawing.Color]::Gray
+
+            $btnCancelDC = New-Object System.Windows.Forms.Button
+            $btnCancelDC.Text     = "Cancel"
+            $btnCancelDC.Location = New-Object System.Drawing.Point(340, 140)
+            $btnCancelDC.Size     = New-Object System.Drawing.Size(72, 26)
+            $btnCancelDC.Add_Click({ $sync.DeviceCancel = $true; $dcForm.Close() })
+
+            $dcForm.Controls.AddRange(@($lbl1, $lnk, $lbl2, $lblCode, $btnCopy, $lblWait, $btnCancelDC))
+
+            $pollTimer = New-Object System.Windows.Forms.Timer
+            $pollTimer.Interval = $pollSec * 1000
+            $pollTimer.Add_Tick({
+                if ($sync.DeviceToken -or $sync.DeviceError -or $sync.DeviceCancel) { return }
+                $pb = [System.Text.Encoding]::UTF8.GetBytes(
+                    "grant_type=urn:ietf:params:oauth:grant-type:device_code" +
+                    "&client_id=$([Uri]::EscapeDataString($clientId))" +
+                    "&device_code=$([Uri]::EscapeDataString($deviceCode))")
+                try {
+                    $rq2 = [System.Net.HttpWebRequest]::Create($tokenUrl)
+                    $rq2.Method        = "POST"
+                    $rq2.ContentType   = "application/x-www-form-urlencoded"
+                    $rq2.ContentLength = $pb.Length
+                    $rq2.Timeout       = 4000
+                    $ss2 = $rq2.GetRequestStream(); $ss2.Write($pb, 0, $pb.Length); $ss2.Close()
+                    try {
+                        $rp2  = $rq2.GetResponse()
+                        $tokJ = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                        $rp2.Close()
+                        if ($tokJ.access_token) {
+                            $sync.DeviceToken = "Bearer $($tokJ.access_token)"
+                            $dcForm.Close()
+                        }
+                    } catch [System.Net.WebException] {
+                        $ex2 = $_.Exception
+                        if ($ex2.Response) {
+                            $ej2 = (New-Object System.IO.StreamReader($ex2.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                            $ex2.Response.Close()
+                            switch ($ej2.error) {
+                                'authorization_pending' {}
+                                'slow_down'             { $pollTimer.Interval += 5000 }
+                                default {
+                                    $sync.DeviceError = "$($ej2.error): $($ej2.error_description)"
+                                    $dcForm.Close()
+                                }
+                            }
+                        }
+                    }
+                } catch {}
+            })
+
+            $dcForm.Add_Shown({ $pollTimer.Start() })
+            $dcForm.Add_FormClosed({ $pollTimer.Stop() })
+            [void]$dcForm.ShowDialog()
+            $pollTimer.Dispose()
+            $dcForm.Dispose()
+
+            if ($sync.DeviceCancel -or (-not $sync.DeviceToken -and -not $sync.DeviceError)) {
+                & $logLine "EXO: sign-in cancelled."
+                & $addRow "EXO sign-in" "SKIP" "Sign-in cancelled — Exchange Online verification skipped"
+            } elseif ($sync.DeviceError) {
+                & $logLine "EXO: sign-in error — $($sync.DeviceError)"
+                & $addRow "EXO sign-in" "FAIL" $sync.DeviceError
+                $sync.DeviceError = $null
+            } else {
+                $exoToken = $sync.DeviceToken; $sync.DeviceToken = $null
+                & $logLine "EXO: access token acquired."
+            }
+        } else {
+            & $addRow "EXO sign-in" "FAIL" "Device code request failed — see Log tab"
+        }
+
+        if ($exoToken -and -not $sync.Cancel) {
+            # Tenant ID + admin UPN from the token claims
+            $tid = $null; $adminUpn = $null
+            try {
+                $p = ($exoToken -replace '^Bearer\s+', '').Split('.')[1].Replace('-', '+').Replace('_', '/')
+                switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } }
+                $claims = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+                $tid      = $claims.tid
+                $adminUpn = if ($claims.upn) { $claims.upn } else { $claims.unique_name }
+            } catch {
+                & $logLine "EXO: could not decode token claims — $($_.Exception.Message)"
+            }
+
+            if ($tid) {
+                & $addRow "EXO sign-in" "OK" "Signed in as $adminUpn"
+                & $setPct 88
+                & $logLine "EXO: invoking Test-MigrationServerAvailability -ExchangeRemoteMove -RemoteServer $fqdn (can take a minute)…"
+                $payload = @{
+                    CmdletInput = @{
+                        CmdletName = 'Test-MigrationServerAvailability'
+                        Parameters = @{
+                            ExchangeRemoteMove = $true
+                            RemoteServer       = $fqdn
+                            Credentials        = @{ UserName = $user; Password = $pass }
+                        }
+                    }
+                } | ConvertTo-Json -Depth 5
+                $pb = [System.Text.Encoding]::UTF8.GetBytes($payload)
+                try {
+                    $rq = [System.Net.HttpWebRequest]::Create("https://outlook.office365.com/adminapi/beta/$tid/InvokeCommand")
+                    $rq.Method        = "POST"
+                    $rq.ContentType   = "application/json"
+                    $rq.Accept        = "application/json"
+                    $rq.ContentLength = $pb.Length
+                    $rq.Timeout       = 180000
+                    $rq.Headers["Authorization"]   = $exoToken
+                    $rq.Headers["X-AnchorMailbox"] = "UPN:$adminUpn"
+                    $ss = $rq.GetRequestStream(); $ss.Write($pb, 0, $pb.Length); $ss.Close()
+                    $rp   = $rq.GetResponse()
+                    $body = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd()
+                    $rp.Close()
+                    & $logLine "EXO response: $body"
+                    $j = $body | ConvertFrom-Json
+                    $v = if ($j.value) { @($j.value)[0] } else { $null }
+                    if ($v -and "$($v.Result)" -match 'Success') {
+                        & $addRow "Test-MigrationServerAvailability" "OK" "Result: $($v.Result)$(if ($v.Message) { " — $($v.Message)" })"
+                    } elseif ($v) {
+                        & $addRow "Test-MigrationServerAvailability" "FAIL" "Result: $($v.Result) — $($v.Message)"
+                    } else {
+                        & $addRow "Test-MigrationServerAvailability" "WARN" "No result object returned — see Log tab"
+                    }
+                } catch [System.Net.WebException] {
+                    $ex = $_.Exception
+                    if ($ex.Response) {
+                        $eBody = ''
+                        try { $eBody = (New-Object System.IO.StreamReader($ex.Response.GetResponseStream())).ReadToEnd() } catch {}
+                        $code = [int]$ex.Response.StatusCode
+                        $ex.Response.Close()
+                        & $logLine "EXO error (HTTP $code): $eBody"
+                        $eMsg = try { ($eBody | ConvertFrom-Json).error.message } catch { $null }
+                        if (-not $eMsg) { $eMsg = "HTTP $code — see Log tab" }
+                        $hint = if ($code -eq 401 -or $code -eq 403) { " (account needs an Exchange admin role with migration permissions)" } else { '' }
+                        & $addRow "Test-MigrationServerAvailability" "FAIL" "$eMsg$hint"
+                    } else {
+                        & $logLine "EXO error: $($ex.Message)"
+                        & $addRow "Test-MigrationServerAvailability" "FAIL" $ex.Message
+                    }
+                } catch {
+                    & $logLine "EXO error: $($_.Exception.Message)"
+                    & $addRow "Test-MigrationServerAvailability" "FAIL" $_.Exception.Message
+                }
+            } else {
+                & $addRow "EXO sign-in" "FAIL" "Could not determine tenant from token"
+            }
+        }
+    }
+
+    # Reset the global validation callback if this runspace set it — the
+    # scriptblock delegate dies with the runspace and would break later probes
+    if ($sync.IgnoreCert) {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+    }
+
+    & $setPct 100
+    $sync.Done = $true
+}
+
+# Adds one result row to the hybrid Results ListView (UI thread only)
+function Add-HybridRow {
+    param($row)
+    $item = New-Object System.Windows.Forms.ListViewItem($row.Step)
+    [void]$item.SubItems.Add($row.Result)
+    [void]$item.SubItems.Add($row.Details)
+    $item.ForeColor = switch ($row.Result) {
+        'OK'    { [System.Drawing.Color]::DarkGreen }
+        'WARN'  { [System.Drawing.Color]::DarkOrange }
+        'FAIL'  { [System.Drawing.Color]::DarkRed }
+        'SKIP'  { [System.Drawing.Color]::Gray }
+        default { [System.Drawing.Color]::Black }
+    }
+    [void]$hybLvwResults.Items.Add($item)
+}
+
+# Called from the poll timer when $sync.Done becomes $true
+function Complete-HybridTest {
+    $script:HybPollTimer.Stop()
+
+    $msg = $null
+    while ($script:HybSync.Queue.TryDequeue([ref]$msg)) { $hybRtbLog.AppendText("$msg`r`n") }
+    $row = $null
+    while ($script:HybSync.RowQueue.TryDequeue([ref]$row)) { Add-HybridRow $row }
+
+    $hybBtnTest.Enabled   = $true
+    $hybBtnCancel.Enabled = $false
+
+    if ($script:HybSync.Cancel) {
+        $hybForm.Text = "Hybrid Deployment  —  Migration Endpoint (MRS Proxy)"
+        $hybRtbLog.AppendText("`r`nTest cancelled.`r`n")
+    } elseif ($script:HybSync.Failed) {
+        $hybForm.Text = "Hybrid Deployment  —  Migration Endpoint (MRS Proxy)  —  Issues found"
+        $hybRtbLog.AppendText("`r`nMigration endpoint test finished with issues.`r`n")
+    } else {
+        $hybForm.Text = "Hybrid Deployment  —  Migration Endpoint (MRS Proxy)  —  OK"
+        $hybRtbLog.AppendText("`r`nMigration endpoint test completed successfully.`r`n")
+    }
+    if ($hybLvwResults.Items.Count -gt 0) { $hybTabCtrl.SelectedTab = $hybTabResults }
+
+    try { $script:HybPS.Dispose() }   catch {}
+    try { $script:HybRS.Close(); $script:HybRS.Dispose() } catch {}
+    $script:HybPS   = $null
+    $script:HybRS   = $null
+    $script:HybSync = $null
+}
+
+$hybBtnTest.Add_Click({
+    $email = $hybTxtEmail.Text.Trim()
+    $fqdn  = ($hybTxtFqdn.Text.Trim() -replace '^https?://', '') -replace '/.*$', ''
+    $user  = $hybTxtUser.Text.Trim()
+    $pass  = $hybTxtPass.Text
+
+    if (-not $fqdn -and $email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Enter the MRS endpoint FQDN, or a valid on-prem e-mail address for AutoDiscover-based discovery.",
+            "Input Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+    if ($hybChkExo.Checked -and (-not $user -or -not $pass)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Explicit on-prem credentials (user + password) are required for the Exchange Online verification" +
+            " — Test-MigrationServerAvailability passes them to the on-prem endpoint.",
+            "Credentials Required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    # Clear any leftover global callback; the test runspace sets its own when
+    # "Ignore certificate errors" is checked
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+
+    # Reset UI
+    $hybForm.Text = "Hybrid Deployment  —  Migration Endpoint (MRS Proxy)"
+    $hybRtbLog.Clear()
+    $hybLvwResults.Items.Clear()
+    $hybPrgBar.Value      = 0
+    $hybBtnTest.Enabled   = $false
+    $hybBtnCancel.Enabled = $true
+    $hybTabCtrl.SelectedTab = $hybTabLog
+
+    $sync = [hashtable]::Synchronized(@{
+        Email        = $email
+        Fqdn         = $fqdn
+        User         = $user
+        Password     = $pass
+        RunExo       = $hybChkExo.Checked
+        IgnoreCert   = $hybChkIgnoreCert.Checked
+        Cancel       = $false
+        Done         = $false
+        Pct          = 0
+        Failed       = $false
+        Queue        = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        RowQueue     = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+        DeviceToken  = $null
+        DeviceError  = $null
+        DeviceCancel = $false
+    })
+    $script:HybSync = $sync
+
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.ApartmentState = [System.Threading.ApartmentState]::STA
+    $rs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+    $rs.Open()
+    $script:HybRS = $rs
+
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($script:HybridTestScript).AddArgument($sync)
+    $script:HybPS = $ps
+    [void]$ps.BeginInvoke()
+
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 100
+    $timer.Add_Tick({
+        $msg = $null
+        while ($script:HybSync -and $script:HybSync.Queue.TryDequeue([ref]$msg)) {
+            $hybRtbLog.AppendText("$msg`r`n")
+            $hybRtbLog.ScrollToCaret()
+        }
+        $row = $null
+        while ($script:HybSync -and $script:HybSync.RowQueue.TryDequeue([ref]$row)) {
+            Add-HybridRow $row
+        }
+        if ($script:HybSync) {
+            $v = $script:HybSync.Pct
+            if ($v -ge 0 -and $v -le 100) { $hybPrgBar.Value = $v }
+        }
+        if ($script:HybSync -and $script:HybSync.Done) {
+            Complete-HybridTest
+        }
+    })
+    $script:HybPollTimer = $timer
+    $timer.Start()
+})
+
+$hybBtnCancel.Add_Click({
+    if ($script:HybSync) { $script:HybSync.Cancel = $true }
+    $hybBtnCancel.Enabled = $false
+    $hybRtbLog.AppendText("Cancelling...`r`n")
+})
+
+$hybForm.Add_FormClosing({
+    if ($script:HybSync)      { $script:HybSync.Cancel = $true }
+    if ($script:HybPollTimer) { $script:HybPollTimer.Stop() }
+    try { $script:HybPS.Dispose() } catch {}
+    try { $script:HybRS.Close(); $script:HybRS.Dispose() } catch {}
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+})
+
+#endregion ===================================================================
 #  START
 #==============================================================================
 
@@ -2491,6 +3400,58 @@ if (-not $upn) {
     } catch {}
 }
 
-if ($upn) { $txtEmail.Text = $upn }
+if ($upn) {
+    $txtEmail.Text    = $upn
+    $hybTxtEmail.Text = $upn
+}
 
-[System.Windows.Forms.Application]::Run($form)
+#region ======================================================================
+#  LAUNCHER
+#==============================================================================
+
+$lForm = New-Object System.Windows.Forms.Form
+$lForm.Text            = "Exchange Tester"
+$lForm.ClientSize      = New-Object System.Drawing.Size(408, 184)
+$lForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$lForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+$lForm.MaximizeBox     = $false
+$lForm.MinimizeBox     = $false
+
+$lLbl = New-Object System.Windows.Forms.Label
+$lLbl.Text     = "Please select a test:"
+$lLbl.Location = New-Object System.Drawing.Point(12, 12)
+$lLbl.AutoSize = $true
+$lLbl.Font     = New-Object System.Drawing.Font($lForm.Font, [System.Drawing.FontStyle]::Bold)
+$lForm.Controls.Add($lLbl)
+
+$lBtnAuto = New-Object System.Windows.Forms.Button
+$lBtnAuto.Text     = "E-Mail AutoConfiguration`nAutoDiscover test — like Outlook's 'Test E-Mail AutoConfiguration'"
+$lBtnAuto.Location = New-Object System.Drawing.Point(12, 40)
+$lBtnAuto.Size     = New-Object System.Drawing.Size(384, 62)
+$lBtnAuto.TabIndex = 0
+$lForm.Controls.Add($lBtnAuto)
+
+$lBtnHyb = New-Object System.Windows.Forms.Button
+$lBtnHyb.Text     = "Hybrid Deployment`nMigration endpoint availability — MRS Proxy, on-prem mailbox"
+$lBtnHyb.Location = New-Object System.Drawing.Point(12, 110)
+$lBtnHyb.Size     = New-Object System.Drawing.Size(384, 62)
+$lBtnHyb.TabIndex = 1
+$lForm.Controls.Add($lBtnHyb)
+
+$script:LauncherChoice = $null
+$lBtnAuto.Add_Click({ $script:LauncherChoice = 'auto';   $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
+$lBtnHyb.Add_Click({  $script:LauncherChoice = 'hybrid'; $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
+
+# Launcher loop: closing a test window returns to the launcher; closing the
+# launcher (X) exits. Modal forms are only hidden on close, so both test
+# windows can be reopened without rebuilding them.
+while ($true) {
+    $script:LauncherChoice = $null
+    [void]$lForm.ShowDialog()
+    if (-not $script:LauncherChoice) { break }
+    switch ($script:LauncherChoice) {
+        'auto'   { [void]$form.ShowDialog() }
+        'hybrid' { [void]$hybForm.ShowDialog() }
+    }
+}
+#endregion
