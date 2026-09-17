@@ -3769,14 +3769,14 @@ function New-FreeBusySoap {
         '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">' +
         '<soap:Header><t:RequestServerVersion Version="Exchange2013"/></soap:Header>' +
         '<soap:Body><m:GetUserAvailabilityRequest>' +
-        '<m:TimeZone><t:Bias>0</t:Bias>' +
+        '<t:TimeZone><t:Bias>0</t:Bias>' +
         '<t:StandardTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:StandardTime>' +
         '<t:DaylightTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:DaylightTime>' +
-        '</m:TimeZone>' +
+        '</t:TimeZone>' +
         '<m:MailboxDataArray><t:MailboxData><t:Email><t:Address>' + $Target + '</t:Address></t:Email>' +
         '<t:AttendeeType>Required</t:AttendeeType><t:ExcludeConflicts>false</t:ExcludeConflicts></t:MailboxData></m:MailboxDataArray>' +
-        '<m:FreeBusyViewOptions><t:TimeWindow><t:StartTime>' + $s + '</t:StartTime><t:EndTime>' + $e + '</t:EndTime></t:TimeWindow>' +
-        '<t:MergedFreeBusyIntervalInMinutes>60</t:MergedFreeBusyIntervalInMinutes><t:RequestedView>FreeBusy</t:RequestedView></m:FreeBusyViewOptions>' +
+        '<t:FreeBusyViewOptions><t:TimeWindow><t:StartTime>' + $s + '</t:StartTime><t:EndTime>' + $e + '</t:EndTime></t:TimeWindow>' +
+        '<t:MergedFreeBusyIntervalInMinutes>60</t:MergedFreeBusyIntervalInMinutes><t:RequestedView>FreeBusy</t:RequestedView></t:FreeBusyViewOptions>' +
         '</m:GetUserAvailabilityRequest></soap:Body></soap:Envelope>')
 }
 
