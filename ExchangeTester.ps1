@@ -3072,7 +3072,7 @@ $script:HybridTestScript = {
         $who = if ($netCred) { $user } else { "logged-in user ($env:USERDOMAIN\$env:USERNAME)" }
         # Probe via WinHTTP for both explicit and logged-in credentials — WinHTTP
         # supplies the TLS channel-binding token, satisfying Extended Protection.
-        & $logLine "Authenticated probe as $who (WinHTTP, Extended-Protection capable) starting."
+        & $logLine "Authenticated probe as $who (WinHTTP) starting."
         $probeUser = if ($netCred) { $user } else { '' }
         $probePass = if ($netCred) { $pass } else { '' }
         $r2 = & $mrsGetWinHttp $mrsUrl $probeUser $probePass $sync.IgnoreCert
@@ -3085,7 +3085,7 @@ $script:HybridTestScript = {
         if ($r2.Code -eq 200) {
             & $addRow "MRS Proxy authentication" "OK" "HTTP 200 as $who — NTLM/Negotiate authentication succeeded"
         } elseif ($r2.Code -eq 401) {
-            & $addRow "MRS Proxy authentication" "WARN" "HTTP 401 as $who — Windows auth was rejected. Likely a wrong password, or the account cannot sign in (a shared/resource mailbox usually has a disabled AD account). Migration-endpoint auth needs an enabled on-prem account; 'Verify from Exchange Online' is the authoritative check."
+            & $addRow "MRS Proxy authentication" "INFO" "HTTP 401 as $who — local authenticated probe could not complete. This is expected when Extended Protection is enabled on the EWS vdir: a local diagnostic request may not satisfy TLS channel binding even with valid credentials. It does NOT mean the endpoint is broken — if the Exchange Online migration endpoint creation (or 'Verify from Exchange Online') succeeds with these credentials, the endpoint is good."
         } elseif ($r2.Code -eq 403) {
             & $addRow "MRS Proxy authentication" "WARN" "HTTP 403 as $who — authenticated but access denied (check MRSProxyEnabled on the EWS vdir)"
         } elseif ($r2.Code -lt 0) {
@@ -3347,6 +3347,7 @@ function Add-HybridRow {
         'OK'    { [System.Drawing.Color]::DarkGreen }
         'WARN'  { [System.Drawing.Color]::DarkOrange }
         'FAIL'  { [System.Drawing.Color]::DarkRed }
+        'INFO'  { [System.Drawing.Color]::SteelBlue }
         'SKIP'  { [System.Drawing.Color]::Gray }
         default { [System.Drawing.Color]::Black }
     }
