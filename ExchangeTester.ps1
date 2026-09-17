@@ -2809,6 +2809,33 @@ $script:HybridTestScript = {
         }
     }
 
+    # Authenticated SOAP POST to the MRS proxy (WinHTTP). Sends a minimal SOAP 1.2
+    # envelope; the WCF service answers with a SOAP fault whose text tells us
+    # definitively whether the MRS proxy is live/enabled. Returns Code + Body.
+    $mrsSoapPost = {
+        param([string]$url, [string]$user, [string]$pass, [bool]$ignoreCert)
+        $wh = $null
+        try {
+            $soap = '<?xml version="1.0" encoding="utf-8"?>' +
+                    '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">' +
+                    '<s:Header/><s:Body/></s:Envelope>'
+            $wh = New-Object -ComObject 'WinHttp.WinHttpRequest.5.1'
+            $wh.Open('POST', $url, $false)
+            $wh.SetTimeouts(20000, 20000, 20000, 20000)
+            if ($ignoreCert) { $wh.Option(4) = 13056 }
+            $wh.Option(6) = $false
+            $wh.SetRequestHeader('Content-Type', 'application/soap+xml; charset=utf-8')
+            if ($user) { $wh.SetCredentials($user, $pass, 0) } else { $wh.SetAutoLogonPolicy(0) }
+            $wh.Send($soap)
+            $bodyTxt = try { "$($wh.ResponseText)" } catch { '' }
+            return @{ Code = [int]$wh.Status; Body = $bodyTxt; Error = $null }
+        } catch {
+            return @{ Code = -1; Body = ''; Error = "WinHTTP: $($_.Exception.Message)" }
+        } finally {
+            if ($wh) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wh) }
+        }
+    }
+
     $abort = $false
 
     # ── Step 1: Endpoint discovery via AutoDiscover (when no FQDN given) ──────
@@ -3113,6 +3140,37 @@ $script:HybridTestScript = {
             & $addRow "MRS Proxy authentication" "FAIL" $r2.Error
         } else {
             & $addRow "MRS Proxy authentication" "WARN" "HTTP $($r2.Code) as $who — unexpected response"
+        }
+    }
+
+    # ── Step 6b: MRS Proxy SOAP probe ─────────────────────────────────────────
+    # A SOAP POST goes further than a GET: the WCF service's own fault text tells
+    # us definitively whether the MRS proxy is live and enabled.
+    if (-not $abort -and -not $sync.Cancel -and ($r2.Code -eq 200 -or $r2.Code -eq 400)) {
+        & $setPct 76
+        & $logLine "SOAP probe (POST application/soap+xml) as $who starting."
+        $probeUser = if ($netCred) { $user } else { '' }
+        $probePass = if ($netCred) { $pass } else { '' }
+        $rs = & $mrsSoapPost $mrsUrl $probeUser $probePass $sync.IgnoreCert
+        & $logLine "  SOAP: httpStatus=$($rs.Code)."
+        if ($rs.Body) {
+            $snip = ($rs.Body -replace '\s+', ' ').Trim()
+            if ($snip.Length -gt 400) { $snip = $snip.Substring(0, 400) + '…' }
+            & $logLine "  SOAP response: $snip"
+        }
+        $b = "$($rs.Body)"
+        if ($rs.Code -lt 0) {
+            & $addRow "MRS Proxy SOAP" "FAIL" $rs.Error
+        } elseif ($rs.Code -eq 401) {
+            & $addRow "MRS Proxy SOAP" "INFO" "HTTP 401 — SOAP request was not authenticated (see the authentication row above)."
+        } elseif ($b -match '(?i)MRSProxy|MailboxReplication|Mailbox Replication|ServiceVersion|WrongServerVersion') {
+            & $addRow "MRS Proxy SOAP" "OK" "The Mailbox Replication proxy answered the SOAP request (HTTP $($rs.Code)) — the MRS proxy is live and enabled. See the Log tab for the server's response."
+        } elseif ($b -match '(?i)disabled|not enabled') {
+            & $addRow "MRS Proxy SOAP" "WARN" "HTTP $($rs.Code) — the server indicates the MRS proxy may be disabled (Set-WebServicesVirtualDirectory -MRSProxyEnabled `$true). See the Log tab."
+        } elseif ($b -match '(?i)Fault|ContractFilter|cannot be processed|Action|a:Sender|a:Receiver') {
+            & $addRow "MRS Proxy SOAP" "OK" "The WCF endpoint processed the SOAP request and returned a fault to the minimal envelope (HTTP $($rs.Code)) — expected, and it confirms a live SOAP service. See the Log tab for the fault text."
+        } else {
+            & $addRow "MRS Proxy SOAP" "INFO" "HTTP $($rs.Code) — see the Log tab for the raw response."
         }
     }
 
