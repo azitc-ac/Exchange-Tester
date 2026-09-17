@@ -3755,12 +3755,316 @@ if ($upn) { $hcTxtEmail.Text = $upn }
 #endregion
 
 #region ======================================================================
+#  FREE/BUSY CROSS-PREMISES TEST
+#==============================================================================
+
+# Build a standard EWS GetUserAvailability (SOAP 1.1) request for one target.
+function New-FreeBusySoap {
+    param([string]$Target)
+    $start = (Get-Date).Date
+    $end   = $start.AddDays(1)
+    $s = $start.ToString('yyyy-MM-ddTHH:mm:ss')
+    $e = $end.ToString('yyyy-MM-ddTHH:mm:ss')
+    return ('<?xml version="1.0" encoding="utf-8"?>' +
+        '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">' +
+        '<soap:Header><t:RequestServerVersion Version="Exchange2013"/></soap:Header>' +
+        '<soap:Body><m:GetUserAvailabilityRequest>' +
+        '<m:TimeZone><t:Bias>0</t:Bias>' +
+        '<t:StandardTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:StandardTime>' +
+        '<t:DaylightTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:DaylightTime>' +
+        '</m:TimeZone>' +
+        '<m:MailboxDataArray><t:MailboxData><t:Email><t:Address>' + $Target + '</t:Address></t:Email>' +
+        '<t:AttendeeType>Required</t:AttendeeType><t:ExcludeConflicts>false</t:ExcludeConflicts></t:MailboxData></m:MailboxDataArray>' +
+        '<m:FreeBusyViewOptions><t:TimeWindow><t:StartTime>' + $s + '</t:StartTime><t:EndTime>' + $e + '</t:EndTime></t:TimeWindow>' +
+        '<t:MergedFreeBusyIntervalInMinutes>60</t:MergedFreeBusyIntervalInMinutes><t:RequestedView>FreeBusy</t:RequestedView></m:FreeBusyViewOptions>' +
+        '</m:GetUserAvailabilityRequest></soap:Body></soap:Envelope>')
+}
+
+# POST GetUserAvailability via WinHTTP. $Mode: 'win' (Windows creds / logged-in)
+# or 'bearer' (OAuth). Returns @{Http; ResponseCode; ViewType; Message; Fault; Raw}.
+function Invoke-FreeBusyProbe {
+    param([string]$EwsUrl, [string]$Target, [string]$Mode, [string]$User, [string]$Pass, [string]$Token, [bool]$IgnoreCert)
+    $soap = New-FreeBusySoap -Target $Target
+    $wh = $null
+    try {
+        $wh = New-Object -ComObject 'WinHttp.WinHttpRequest.5.1'
+        $wh.Open('POST', $EwsUrl, $false)
+        $wh.SetTimeouts(30000, 30000, 30000, 30000)
+        if ($IgnoreCert) { $wh.Option(4) = 13056 }
+        $wh.Option(6) = $false
+        $wh.SetRequestHeader('Content-Type', 'text/xml; charset=utf-8')
+        if ($Mode -eq 'bearer') { $wh.SetRequestHeader('Authorization', $Token) }
+        elseif ($User)          { $wh.SetCredentials($User, $Pass, 0) }
+        else                    { $wh.SetAutoLogonPolicy(0) }
+        $wh.Send($soap)
+        $code = [int]$wh.Status
+        $body = try { "$($wh.ResponseText)" } catch { '' }
+        $rc = ''; $view = ''; $msg = ''; $fault = ''
+        if ($body -match '<(?:\w+:)?ResponseCode>([^<]+)<')     { $rc = $Matches[1] }
+        if ($body -match '<(?:\w+:)?FreeBusyViewType>([^<]+)<') { $view = $Matches[1] }
+        if ($body -match '<(?:\w+:)?MessageText>([^<]+)<')      { $msg = $Matches[1] }
+        if ($body -match '<(?:\w+:)?faultstring[^>]*>([^<]+)<') { $fault = $Matches[1] }
+        return @{ Http = $code; ResponseCode = $rc; ViewType = $view; Message = $msg; Fault = $fault; Raw = $body }
+    } catch {
+        return @{ Http = -1; ResponseCode = ''; ViewType = ''; Message = ''; Fault = "WinHTTP: $($_.Exception.Message)"; Raw = '' }
+    } finally {
+        if ($wh) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wh) }
+    }
+}
+
+# Device-code sign-in for an Exchange Online EWS token (UI thread). Returns "Bearer …" or $null.
+function Get-ExoEwsToken {
+    $clientId = 'd3590ed6-52b3-4102-aeff-aad2292ab01c'   # Microsoft Office (public client)
+    $scope    = 'https://outlook.office365.com/EWS.AccessAsUser.All offline_access'
+    $dcUrl    = 'https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode'
+    $tkUrl    = 'https://login.microsoftonline.com/organizations/oauth2/v2.0/token'
+    $dcJson = $null
+    try {
+        $b = [System.Text.Encoding]::UTF8.GetBytes("client_id=$([Uri]::EscapeDataString($clientId))&scope=$([Uri]::EscapeDataString($scope))")
+        $rq = [System.Net.HttpWebRequest]::Create($dcUrl); $rq.Method = 'POST'; $rq.ContentType = 'application/x-www-form-urlencoded'; $rq.ContentLength = $b.Length; $rq.Timeout = 15000
+        $s = $rq.GetRequestStream(); $s.Write($b, 0, $b.Length); $s.Close()
+        $rp = $rq.GetResponse(); $dcJson = (New-Object System.IO.StreamReader($rp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json; $rp.Close()
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Device code request failed:`n$($_.Exception.Message)", "Auth Error", 0, 16) | Out-Null
+        return $null
+    }
+    $st = @{ Tok = $null; Err = $null; Cancel = $false }
+    $uc = $dcJson.user_code; $dcode = $dcJson.device_code
+    $vuri = if ($dcJson.verification_uri) { $dcJson.verification_uri } else { $dcJson.verification_url }
+    $poll = [int]$dcJson.interval; if ($poll -lt 5) { $poll = 5 }
+
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Sign in to Exchange Online (EWS)"; $f.Size = New-Object System.Drawing.Size(450, 210)
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen; $f.MinimizeBox = $false
+    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $l1 = New-Object System.Windows.Forms.Label; $l1.Text = "1.  Open a browser and go to:"; $l1.Location = New-Object System.Drawing.Point(12, 14); $l1.AutoSize = $true
+    $lnk = New-Object System.Windows.Forms.LinkLabel; $lnk.Text = $vuri; $lnk.Location = New-Object System.Drawing.Point(28, 34); $lnk.AutoSize = $true
+    $lnk.Add_LinkClicked({ [System.Diagnostics.Process]::Start($lnk.Text) })
+    $l2 = New-Object System.Windows.Forms.Label; $l2.Text = "2.  Enter this code (sign in as the EXO mailbox user):"; $l2.Location = New-Object System.Drawing.Point(12, 62); $l2.AutoSize = $true
+    $lc = New-Object System.Windows.Forms.Label; $lc.Text = $uc; $lc.Font = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold); $lc.Location = New-Object System.Drawing.Point(28, 80); $lc.AutoSize = $true; $lc.ForeColor = [System.Drawing.Color]::DarkBlue
+    $bc = New-Object System.Windows.Forms.Button; $bc.Text = "Copy"; $bc.Location = New-Object System.Drawing.Point(348, 82); $bc.Size = New-Object System.Drawing.Size(72, 26)
+    $bc.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($uc) })
+    $lw = New-Object System.Windows.Forms.Label; $lw.Text = "Waiting for sign-in…"; $lw.Location = New-Object System.Drawing.Point(12, 144); $lw.AutoSize = $true; $lw.ForeColor = [System.Drawing.Color]::Gray
+    $bx = New-Object System.Windows.Forms.Button; $bx.Text = "Cancel"; $bx.Location = New-Object System.Drawing.Point(348, 140); $bx.Size = New-Object System.Drawing.Size(72, 26)
+    $bx.Add_Click({ $st.Cancel = $true; $f.Close() })
+    $f.Controls.AddRange(@($l1, $lnk, $l2, $lc, $bc, $lw, $bx))
+    $t = New-Object System.Windows.Forms.Timer; $t.Interval = $poll * 1000
+    $t.Add_Tick({
+        if ($st.Tok -or $st.Err -or $st.Cancel) { return }
+        $pb = [System.Text.Encoding]::UTF8.GetBytes("grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$([Uri]::EscapeDataString($clientId))&device_code=$([Uri]::EscapeDataString($dcode))")
+        try {
+            $rq2 = [System.Net.HttpWebRequest]::Create($tkUrl); $rq2.Method = 'POST'; $rq2.ContentType = 'application/x-www-form-urlencoded'; $rq2.ContentLength = $pb.Length; $rq2.Timeout = 4000
+            $s2 = $rq2.GetRequestStream(); $s2.Write($pb, 0, $pb.Length); $s2.Close()
+            try {
+                $rp2 = $rq2.GetResponse(); $tj = (New-Object System.IO.StreamReader($rp2.GetResponseStream())).ReadToEnd() | ConvertFrom-Json; $rp2.Close()
+                if ($tj.access_token) { $st.Tok = "Bearer $($tj.access_token)"; $f.Close() }
+            } catch [System.Net.WebException] {
+                $e2 = $_.Exception
+                if ($e2.Response) {
+                    $ej = (New-Object System.IO.StreamReader($e2.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json; $e2.Response.Close()
+                    switch ($ej.error) { 'authorization_pending' {} 'slow_down' { $t.Interval += 5000 } default { $st.Err = "$($ej.error): $($ej.error_description)"; $f.Close() } }
+                }
+            }
+        } catch {}
+    })
+    $f.Add_Shown({ $t.Start() }); $f.Add_FormClosed({ $t.Stop() })
+    [void]$f.ShowDialog(); $t.Dispose(); $f.Dispose()
+    if ($st.Err) { [System.Windows.Forms.MessageBox]::Show("Sign-in error: $($st.Err)", "Auth Error", 0, 16) | Out-Null }
+    return $st.Tok
+}
+
+$fbForm = New-Object System.Windows.Forms.Form
+$fbForm.Text            = "Free/Busy  —  Cross-Premises Availability"
+$fbForm.ClientSize      = New-Object System.Drawing.Size(824, 470)
+$fbForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$fbForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+$fbForm.MinimizeBox     = $true
+$fbForm.MaximizeBox     = $true
+$fbForm.MinimumSize     = New-Object System.Drawing.Size(660, 420)
+
+$fbAnchLR = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
+$fbAnchTR = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
+
+$fbLblHost = New-Object System.Windows.Forms.Label
+$fbLblHost.Text = "On-Prem EWS Host"; $fbLblHost.Location = New-Object System.Drawing.Point(8, 14); $fbLblHost.Size = New-Object System.Drawing.Size(140, 20)
+$fbForm.Controls.Add($fbLblHost)
+$fbTxtHost = New-Object System.Windows.Forms.TextBox
+$fbTxtHost.Location = New-Object System.Drawing.Point(152, 11); $fbTxtHost.Size = New-Object System.Drawing.Size(500, 22); $fbTxtHost.Anchor = $fbAnchLR; $fbTxtHost.TabIndex = 0
+$fbForm.Controls.Add($fbTxtHost)
+$fbLblHostHint = New-Object System.Windows.Forms.Label
+$fbLblHostHint.Text = "(e.g. mail.contoso.com)"; $fbLblHostHint.Location = New-Object System.Drawing.Point(660, 14); $fbLblHostHint.Size = New-Object System.Drawing.Size(156, 20); $fbLblHostHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblHostHint.Anchor = $fbAnchTR
+$fbForm.Controls.Add($fbLblHostHint)
+
+$fbLblUser = New-Object System.Windows.Forms.Label
+$fbLblUser.Text = "On-Prem User"; $fbLblUser.Location = New-Object System.Drawing.Point(8, 42); $fbLblUser.Size = New-Object System.Drawing.Size(140, 20)
+$fbForm.Controls.Add($fbLblUser)
+$fbTxtUser = New-Object System.Windows.Forms.TextBox
+$fbTxtUser.Location = New-Object System.Drawing.Point(152, 39); $fbTxtUser.Size = New-Object System.Drawing.Size(240, 22); $fbTxtUser.TabIndex = 1
+$fbForm.Controls.Add($fbTxtUser)
+$fbLblPass = New-Object System.Windows.Forms.Label
+$fbLblPass.Text = "Password"; $fbLblPass.Location = New-Object System.Drawing.Point(404, 42); $fbLblPass.Size = New-Object System.Drawing.Size(70, 20)
+$fbForm.Controls.Add($fbLblPass)
+$fbTxtPass = New-Object System.Windows.Forms.TextBox
+$fbTxtPass.Location = New-Object System.Drawing.Point(480, 39); $fbTxtPass.Size = New-Object System.Drawing.Size(172, 22); $fbTxtPass.PasswordChar = [char]0x25CF; $fbTxtPass.TabIndex = 2
+$fbForm.Controls.Add($fbTxtPass)
+
+$fbLblOnp = New-Object System.Windows.Forms.Label
+$fbLblOnp.Text = "On-Prem Mailbox"; $fbLblOnp.Location = New-Object System.Drawing.Point(8, 70); $fbLblOnp.Size = New-Object System.Drawing.Size(140, 20)
+$fbForm.Controls.Add($fbLblOnp)
+$fbTxtOnp = New-Object System.Windows.Forms.TextBox
+$fbTxtOnp.Location = New-Object System.Drawing.Point(152, 67); $fbTxtOnp.Size = New-Object System.Drawing.Size(500, 22); $fbTxtOnp.Anchor = $fbAnchLR; $fbTxtOnp.TabIndex = 3
+$fbForm.Controls.Add($fbTxtOnp)
+$fbLblOnpHint = New-Object System.Windows.Forms.Label
+$fbLblOnpHint.Text = "(target for EXO → On-Prem)"; $fbLblOnpHint.Location = New-Object System.Drawing.Point(660, 70); $fbLblOnpHint.Size = New-Object System.Drawing.Size(156, 20); $fbLblOnpHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblOnpHint.Anchor = $fbAnchTR
+$fbForm.Controls.Add($fbLblOnpHint)
+
+$fbLblExo = New-Object System.Windows.Forms.Label
+$fbLblExo.Text = "EXO Mailbox"; $fbLblExo.Location = New-Object System.Drawing.Point(8, 98); $fbLblExo.Size = New-Object System.Drawing.Size(140, 20)
+$fbForm.Controls.Add($fbLblExo)
+$fbTxtExo = New-Object System.Windows.Forms.TextBox
+$fbTxtExo.Location = New-Object System.Drawing.Point(152, 95); $fbTxtExo.Size = New-Object System.Drawing.Size(500, 22); $fbTxtExo.Anchor = $fbAnchLR; $fbTxtExo.TabIndex = 4
+$fbForm.Controls.Add($fbTxtExo)
+$fbLblExoHint = New-Object System.Windows.Forms.Label
+$fbLblExoHint.Text = "(target for On-Prem → EXO)"; $fbLblExoHint.Location = New-Object System.Drawing.Point(660, 98); $fbLblExoHint.Size = New-Object System.Drawing.Size(156, 20); $fbLblExoHint.ForeColor = [System.Drawing.Color]::Gray; $fbLblExoHint.Anchor = $fbAnchTR
+$fbForm.Controls.Add($fbLblExoHint)
+
+$fbChkIgnore = New-Object System.Windows.Forms.CheckBox
+$fbChkIgnore.Text = "Ignore certificate errors"; $fbChkIgnore.Location = New-Object System.Drawing.Point(152, 124); $fbChkIgnore.Size = New-Object System.Drawing.Size(220, 20); $fbChkIgnore.TabIndex = 5
+$fbForm.Controls.Add($fbChkIgnore)
+
+$fbBtnTest = New-Object System.Windows.Forms.Button
+$fbBtnTest.Text = "Test"; $fbBtnTest.Location = New-Object System.Drawing.Point(656, 120); $fbBtnTest.Size = New-Object System.Drawing.Size(76, 26); $fbBtnTest.Anchor = $fbAnchTR; $fbBtnTest.TabIndex = 6
+$fbForm.Controls.Add($fbBtnTest); $fbForm.AcceptButton = $fbBtnTest
+$fbBtnClose = New-Object System.Windows.Forms.Button
+$fbBtnClose.Text = "Close"; $fbBtnClose.Location = New-Object System.Drawing.Point(740, 120); $fbBtnClose.Size = New-Object System.Drawing.Size(76, 26); $fbBtnClose.Anchor = $fbAnchTR; $fbBtnClose.TabIndex = 7
+$fbBtnClose.Add_Click({ $fbForm.Close() }); $fbForm.CancelButton = $fbBtnClose
+$fbForm.Controls.Add($fbBtnClose)
+
+$fbLvw = New-Object System.Windows.Forms.ListView
+$fbLvw.Location = New-Object System.Drawing.Point(8, 156); $fbLvw.Size = New-Object System.Drawing.Size(808, 306)
+$fbLvw.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
+$fbLvw.View = [System.Windows.Forms.View]::Details; $fbLvw.FullRowSelect = $true; $fbLvw.GridLines = $true; $fbLvw.ShowItemToolTips = $true
+$fbLvw.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+[void]$fbLvw.Columns.Add("Direction", 150)
+[void]$fbLvw.Columns.Add("Result", 70)
+[void]$fbLvw.Columns.Add("Details", 580)
+$fbLvw.Add_DoubleClick({
+    if ($fbLvw.SelectedItems.Count -gt 0) {
+        $it = $fbLvw.SelectedItems[0]
+        $txt = "$($it.Text) — $($it.SubItems[1].Text)`r`n`r`n$($it.SubItems[2].Text)`r`n`r`n$($it.ToolTipText)"
+        try { [System.Windows.Forms.Clipboard]::SetText($txt) } catch {}
+        [System.Windows.Forms.MessageBox]::Show($txt, "Free/Busy detail (copied to clipboard)", 0, 64) | Out-Null
+    }
+})
+$fbForm.Controls.Add($fbLvw)
+
+$toolTip.SetToolTip($fbTxtHost, "External FQDN of the on-prem Exchange host serving EWS (e.g. mail.contoso.com).")
+$toolTip.SetToolTip($fbTxtUser, "On-prem account (DOMAIN\user or UPN). Leave empty to use the logged-in Windows user. Used for the On-Prem → EXO direction.")
+$toolTip.SetToolTip($fbTxtOnp,  "An on-premises mailbox SMTP address — the target queried in the EXO → On-Prem direction.")
+$toolTip.SetToolTip($fbTxtExo,  "An Exchange Online mailbox SMTP address — the target queried in the On-Prem → EXO direction.")
+
+# Add one result row (interpreting a probe result)
+function Add-FbRow {
+    param([string]$Dir, $R, [string]$Ctx)
+    $res = ''; $det = ''
+    if ($R.Http -eq 401) {
+        $res = 'FAIL'; $det = "HTTP 401 — authentication failed. $Ctx"
+    } elseif ($R.Http -lt 0) {
+        $res = 'FAIL'; $det = "$($R.Fault) $Ctx"
+    } elseif ($R.ResponseCode -eq 'NoError' -and $R.ViewType -and $R.ViewType -ne 'None') {
+        $res = 'OK'; $det = "Free/busy retrieved (view = $($R.ViewType)) — cross-premises availability works. $Ctx"
+    } elseif ($R.ResponseCode -eq 'NoError' -and $R.ViewType -eq 'None') {
+        $res = 'WARN'; $det = "Call succeeded but returned no free/busy data (view = None) — the requestor may lack cross-org access or calendar permission. $Ctx"
+    } elseif ($R.ResponseCode) {
+        $extra = if ($R.Message) { " — $($R.Message)" } else { '' }
+        $res = 'FAIL'; $det = "$($R.ResponseCode)$extra. $Ctx"
+    } elseif ($R.Fault) {
+        $res = 'FAIL'; $det = "$($R.Fault). $Ctx"
+    } else {
+        $res = 'INFO'; $det = "HTTP $($R.Http) — see detail (double-click). $Ctx"
+    }
+    $it = New-Object System.Windows.Forms.ListViewItem($Dir)
+    [void]$it.SubItems.Add($res)
+    [void]$it.SubItems.Add($det)
+    $it.ToolTipText = "$Ctx`r`n$($R.Raw)"
+    $it.ForeColor = switch ($res) {
+        'OK'   { [System.Drawing.Color]::DarkGreen }
+        'WARN' { [System.Drawing.Color]::DarkOrange }
+        'FAIL' { [System.Drawing.Color]::DarkRed }
+        'INFO' { [System.Drawing.Color]::SteelBlue }
+        'SKIP' { [System.Drawing.Color]::Gray }
+        default { [System.Drawing.Color]::Black }
+    }
+    [void]$fbLvw.Items.Add($it)
+}
+function Add-FbSkip { param([string]$Dir, [string]$Why)
+    $it = New-Object System.Windows.Forms.ListViewItem($Dir)
+    [void]$it.SubItems.Add('SKIP'); [void]$it.SubItems.Add($Why)
+    $it.ForeColor = [System.Drawing.Color]::Gray
+    [void]$fbLvw.Items.Add($it)
+}
+
+$fbBtnTest.Add_Click({
+    $onpHost = ($fbTxtHost.Text.Trim() -replace '^https?://', '') -replace '/.*$', ''
+    $onpUser = $fbTxtUser.Text.Trim(); $onpPass = $fbTxtPass.Text
+    $onpMbx  = $fbTxtOnp.Text.Trim();  $exoMbx  = $fbTxtExo.Text.Trim()
+    $ign     = $fbChkIgnore.Checked
+    if (-not $onpHost) {
+        [System.Windows.Forms.MessageBox]::Show("Please enter the on-prem EWS host (e.g. mail.contoso.com).", "Input Required", 0, 48) | Out-Null
+        return
+    }
+    if (-not $onpMbx -and -not $exoMbx) {
+        [System.Windows.Forms.MessageBox]::Show("Enter at least one target mailbox (on-prem and/or EXO).", "Input Required", 0, 48) | Out-Null
+        return
+    }
+    $fbLvw.Items.Clear()
+    $fbBtnTest.Enabled = $false
+    $fbForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $ewsOnprem = "https://$onpHost/EWS/Exchange.asmx"
+        # Direction A: On-Prem → EXO (on-prem EWS with Windows creds, target = EXO mailbox)
+        if ($exoMbx) {
+            [System.Windows.Forms.Application]::DoEvents()
+            $rA = Invoke-FreeBusyProbe -EwsUrl $ewsOnprem -Target $exoMbx -Mode 'win' -User $onpUser -Pass $onpPass -Token '' -IgnoreCert $ign
+            Add-FbRow "On-Prem → EXO" $rA "$ewsOnprem  →  $exoMbx"
+        } else {
+            Add-FbSkip "On-Prem → EXO" "No EXO mailbox entered."
+        }
+        # Direction B: EXO → On-Prem (EXO EWS with OAuth, target = on-prem mailbox)
+        if ($onpMbx) {
+            $fbForm.Cursor = [System.Windows.Forms.Cursors]::Default
+            $tok = Get-ExoEwsToken
+            $fbForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            if ($tok) {
+                [System.Windows.Forms.Application]::DoEvents()
+                $rB = Invoke-FreeBusyProbe -EwsUrl 'https://outlook.office365.com/EWS/Exchange.asmx' -Target $onpMbx -Mode 'bearer' -User '' -Pass '' -Token $tok -IgnoreCert $ign
+                Add-FbRow "EXO → On-Prem" $rB "Exchange Online EWS  →  $onpMbx"
+            } else {
+                Add-FbSkip "EXO → On-Prem" "Exchange Online sign-in cancelled or failed."
+            }
+        } else {
+            Add-FbSkip "EXO → On-Prem" "No on-prem mailbox entered."
+        }
+    } finally {
+        $fbForm.Cursor = [System.Windows.Forms.Cursors]::Default
+        $fbBtnTest.Enabled = $true
+    }
+})
+
+# Pre-fill from the detected UPN
+if ($upn) {
+    $fbTxtOnp.Text = $upn
+    if ($upn -match '@([^@\s]+)$') { $fbTxtHost.Text = "mail.$($Matches[1])" }
+}
+#endregion
+
+#region ======================================================================
 #  LAUNCHER
 #==============================================================================
 
 $lForm = New-Object System.Windows.Forms.Form
 $lForm.Text            = "Exchange Tester"
-$lForm.ClientSize      = New-Object System.Drawing.Size(408, 254)
+$lForm.ClientSize      = New-Object System.Drawing.Size(408, 318)
 $lForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $lForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $lForm.MaximizeBox     = $false
@@ -3794,10 +4098,18 @@ $lBtnHcon.Size     = New-Object System.Drawing.Size(384, 58)
 $lBtnHcon.TabIndex = 2
 $lForm.Controls.Add($lBtnHcon)
 
+$lBtnFb = New-Object System.Windows.Forms.Button
+$lBtnFb.Text     = "Free/Busy (Cross-Premises)`nAvailability both directions with real mailboxes — On-Prem ↔ EXO"
+$lBtnFb.Location = New-Object System.Drawing.Point(12, 232)
+$lBtnFb.Size     = New-Object System.Drawing.Size(384, 58)
+$lBtnFb.TabIndex = 3
+$lForm.Controls.Add($lBtnFb)
+
 $script:LauncherChoice = $null
 $lBtnAuto.Add_Click({ $script:LauncherChoice = 'auto';   $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
 $lBtnHyb.Add_Click({  $script:LauncherChoice = 'hybrid'; $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
 $lBtnHcon.Add_Click({ $script:LauncherChoice = 'hcon';   $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
+$lBtnFb.Add_Click({   $script:LauncherChoice = 'freebusy'; $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
 
 # Launcher loop: closing a test window returns to the launcher; closing the
 # launcher (X) exits. Modal forms are only hidden on close, so all test
@@ -3807,9 +4119,10 @@ while ($true) {
     [void]$lForm.ShowDialog()
     if (-not $script:LauncherChoice) { break }
     switch ($script:LauncherChoice) {
-        'auto'   { [void]$form.ShowDialog() }
-        'hybrid' { [void]$hybForm.ShowDialog() }
-        'hcon'   { [void]$hcForm.ShowDialog() }
+        'auto'     { [void]$form.ShowDialog() }
+        'hybrid'   { [void]$hybForm.ShowDialog() }
+        'hcon'     { [void]$hcForm.ShowDialog() }
+        'freebusy' { [void]$fbForm.ShowDialog() }
     }
 }
 #endregion
