@@ -2816,15 +2816,17 @@ $script:HybridTestScript = {
         param([string]$url, [string]$user, [string]$pass, [bool]$ignoreCert)
         $wh = $null
         try {
+            # SOAP 1.1 (text/xml) — the EWS/MRS family uses SOAP 1.1, not 1.2.
             $soap = '<?xml version="1.0" encoding="utf-8"?>' +
-                    '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">' +
-                    '<s:Header/><s:Body/></s:Envelope>'
+                    '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">' +
+                    '<soap:Body/></soap:Envelope>'
             $wh = New-Object -ComObject 'WinHttp.WinHttpRequest.5.1'
             $wh.Open('POST', $url, $false)
             $wh.SetTimeouts(20000, 20000, 20000, 20000)
             if ($ignoreCert) { $wh.Option(4) = 13056 }
             $wh.Option(6) = $false
-            $wh.SetRequestHeader('Content-Type', 'application/soap+xml; charset=utf-8')
+            $wh.SetRequestHeader('Content-Type', 'text/xml; charset=utf-8')
+            $wh.SetRequestHeader('SOAPAction', '""')
             if ($user) { $wh.SetCredentials($user, $pass, 0) } else { $wh.SetAutoLogonPolicy(0) }
             $wh.Send($soap)
             $bodyTxt = try { "$($wh.ResponseText)" } catch { '' }
@@ -3169,6 +3171,8 @@ $script:HybridTestScript = {
             & $addRow "MRS Proxy SOAP" "WARN" "HTTP $($rs.Code) — the server indicates the MRS proxy may be disabled (Set-WebServicesVirtualDirectory -MRSProxyEnabled `$true). See the Log tab."
         } elseif ($b -match '(?i)Fault|ContractFilter|cannot be processed|Action|a:Sender|a:Receiver') {
             & $addRow "MRS Proxy SOAP" "OK" "The WCF endpoint processed the SOAP request and returned a fault to the minimal envelope (HTTP $($rs.Code)) — expected, and it confirms a live SOAP service. See the Log tab for the fault text."
+        } elseif ($rs.Code -eq 503 -or $rs.Code -eq 415) {
+            & $addRow "MRS Proxy SOAP" "INFO" "HTTP $($rs.Code) — the endpoint did not service this SOAP request. The MRSProxy WCF binding is internal/undocumented, so a hand-crafted local SOAP call is inconclusive. This is not a fault of the endpoint — the authenticated 400 above already proves it is a live MRS proxy that accepts your credentials; 'Verify from Exchange Online' is the end-to-end proof."
         } else {
             & $addRow "MRS Proxy SOAP" "INFO" "HTTP $($rs.Code) — see the Log tab for the raw response."
         }
@@ -3389,8 +3393,12 @@ $script:HybridTestScript = {
                         & $logLine "EXO error (HTTP $code): $eBody"
                         $eMsg = try { ($eBody | ConvertFrom-Json).error.message } catch { $null }
                         if (-not $eMsg) { $eMsg = "HTTP $code — see Log tab" }
-                        $hint = if ($code -eq 401 -or $code -eq 403) { " (account needs an Exchange admin role with migration permissions)" } else { '' }
-                        & $addRow "Test-MigrationServerAvailability" "FAIL" "$eMsg$hint"
+                        if ($eBody -match 'Unable to cast|InvalidCastException') {
+                            & $addRow "Test-MigrationServerAvailability" "INFO" "This cmdlet could not be invoked through the Exchange Online REST AdminAPI — a server-side serialization error on the Credentials parameter, i.e. a limitation of calling it this way, not an endpoint problem. Run 'Test-MigrationServerAvailability' in Exchange Online PowerShell, or rely on a successful New-MigrationEndpoint (which runs the same check server-side)."
+                        } else {
+                            $hint = if ($code -eq 401 -or $code -eq 403) { " (account needs an Exchange admin role with migration permissions)" } else { '' }
+                            & $addRow "Test-MigrationServerAvailability" "FAIL" "$eMsg$hint"
+                        }
                     } else {
                         & $logLine "EXO error: $($ex.Message)"
                         & $addRow "Test-MigrationServerAvailability" "FAIL" $ex.Message
