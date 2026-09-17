@@ -160,11 +160,15 @@ Results use the same reachability verdict, colouring and CSV export as Additiona
 
 ## 4. Free/Busy (Cross-Premises)
 
-Tests hybrid **availability sharing** with real mailboxes, in both directions, using the standard EWS `GetUserAvailability` operation (a documented SOAP call — reliable, unlike the internal MRSProxy binding). Enter the on-prem EWS host, on-prem credentials, and one mailbox on each side, then **Test**:
+Tests hybrid **availability sharing** with real mailboxes, in both directions, using the standard EWS `GetUserAvailability` operation (a documented SOAP call — reliable, unlike the internal MRSProxy binding). Enter just **two mailboxes** — one on-premises and one Exchange Online — then **Test**. Everything else is worked out automatically:
+
+- The **on-prem EWS URL** is discovered via AutoDiscover from the on-prem mailbox. If it can't be determined, the tool asks you for the on-prem host.
+- **On-Prem → EXO** runs as the **logged-in Windows user**.
+- **EXO → On-Prem** signs you in once via **device code** (as the EXO mailbox user).
 
 | Direction | How | Auth |
 |---|---|---|
-| **On-Prem → EXO** | on-prem EWS queries the free/busy of the **EXO mailbox** | Windows (NTLM/Negotiate via WinHTTP — handles Extended Protection) |
+| **On-Prem → EXO** | on-prem EWS queries the free/busy of the **EXO mailbox** | logged-in Windows user (NTLM/Negotiate via WinHTTP — handles Extended Protection) |
 | **EXO → On-Prem** | Exchange Online EWS queries the free/busy of the **on-prem mailbox** | OAuth — device-code sign-in as the EXO mailbox user |
 
 Each row interprets the EWS response:
@@ -175,7 +179,7 @@ Each row interprets the EWS response:
 | **WARN** | `NoError` but `FreeBusyViewType None` → call succeeded but no data (missing cross-org access or calendar permission) |
 | **FAIL** | an EWS error code / SOAP fault (shown), or HTTP 401 (auth failed) |
 
-Hover a row for the raw response; **double-click** to view it in full (and copy it to the clipboard). Leaving the On-Prem User empty uses the logged-in Windows user for the On-Prem → EXO direction.
+Hover a row for the raw response; **double-click** to view it in full (and copy it to the clipboard). The On-Prem → EXO direction runs as your logged-in Windows user.
 
 ---
 
