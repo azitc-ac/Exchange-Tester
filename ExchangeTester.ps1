@@ -428,6 +428,27 @@ function ConvertFrom-AutodiscoverXml {
                 if ($nExt) { & $add $grp "$store External URL" $nExt.InnerText }
             }
         }
+
+        # --- Alternative Mailboxes (shared/delegate mailboxes returned by AutoDiscover) ---
+        $altBoxes = $xd.SelectNodes("//ad:Account/ad:AlternativeMailbox", $ns)
+        $altIdx = 0
+        foreach ($alt in $altBoxes) {
+            $altIdx++
+            $dn = & $txt $alt "ad:DisplayName"
+            $gname = if ($dn) { "Alternative Mailbox: $dn" } else { "Alternative Mailbox $altIdx" }
+            & $add $gname "Type"              (& $txt $alt "ad:Type")
+            & $add $gname "Display Name"      $dn
+            & $add $gname "SMTP Address"      (& $txt $alt "ad:SmtpAddress")
+            & $add $gname "Legacy DN"         (& $txt $alt "ad:LegacyDN")
+            & $add $gname "Server"            (& $txt $alt "ad:Server")
+            & $add $gname "Owner SMTP Address" (& $txt $alt "ad:OwnerSmtpAddress")
+        }
+
+        # --- Public Folder Information ---
+        $pfi = $xd.SelectSingleNode("//ad:Account/ad:PublicFolderInformation", $ns)
+        if ($pfi) {
+            & $add "Public Folder Information" "SMTP Address" (& $txt $pfi "ad:SmtpAddress")
+        }
     } catch {
         $rows.Add([PSCustomObject]@{
             Group   = "Error"
@@ -2155,11 +2176,12 @@ $btnAddTests.Add_Click({
     $lv.FullRowSelect = $true
     $lv.GridLines     = $true
     $lv.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
-    [void]$lv.Columns.Add("Protocol",  72)
-    [void]$lv.Columns.Add("Field",    148)
-    [void]$lv.Columns.Add("Status",    52)
-    [void]$lv.Columns.Add("URL",      430)
-    [void]$lv.Columns.Add("Auth / Info", 195)
+    [void]$lv.Columns.Add("Protocol",  68)
+    [void]$lv.Columns.Add("Field",    130)
+    [void]$lv.Columns.Add("Status",    48)
+    [void]$lv.Columns.Add("Result",   150)
+    [void]$lv.Columns.Add("URL",      370)
+    [void]$lv.Columns.Add("Auth / Info", 170)
 
     # Right-click context menu: copy URL / copy all as CSV
     $ctxLv     = New-Object System.Windows.Forms.ContextMenuStrip
@@ -2167,7 +2189,7 @@ $btnAddTests.Add_Click({
     [void]$ctxLv.Items.Add($miCopyUrl)
     $miCopyUrl.Add_Click({
         if ($lv.SelectedItems.Count -gt 0) {
-            [System.Windows.Forms.Clipboard]::SetText($lv.SelectedItems[0].SubItems[3].Text)
+            [System.Windows.Forms.Clipboard]::SetText($lv.SelectedItems[0].SubItems[4].Text)
         }
     })
     [void]$ctxLv.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
@@ -2178,14 +2200,15 @@ $btnAddTests.Add_Click({
     # CSV builder (shared by Copy and Save buttons)
     $makeCsv = {
         $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine('"Protocol";"Field";"Status";"URL";"Auth / Info"')
+        [void]$sb.AppendLine('"Protocol";"Field";"Status";"Result";"URL";"Auth / Info"')
         foreach ($row in $lv.Items) {
             $cols = @(
                 $row.Text,
                 $row.SubItems[1].Text,
                 $row.SubItems[2].Text,
                 $row.SubItems[3].Text,
-                $row.SubItems[4].Text
+                $row.SubItems[4].Text,
+                $row.SubItems[5].Text
             )
             $line = ($cols | ForEach-Object { '"' + ($_ -replace '"','""') + '"' }) -join ';'
             [void]$sb.AppendLine($line)
@@ -2245,9 +2268,10 @@ $btnAddTests.Add_Click({
         $entry | Add-Member -NotePropertyName Index -NotePropertyValue $i -Force
         $item = New-Object System.Windows.Forms.ListViewItem($entry.Protocol)
         [void]$item.SubItems.Add($entry.Field)
-        [void]$item.SubItems.Add("…")
+        [void]$item.SubItems.Add("…")   # Status
+        [void]$item.SubItems.Add("")     # Result
         [void]$item.SubItems.Add($entry.Url)
-        [void]$item.SubItems.Add("")
+        [void]$item.SubItems.Add("")     # Auth / Info
         $item.ForeColor = [System.Drawing.Color]::Gray
         [void]$lv.Items.Add($item)
         $lvItems[$i] = $item
@@ -2351,15 +2375,25 @@ $btnAddTests.Add_Click({
             if ($lvItems.ContainsKey($upd.Index)) {
                 $item = $lvItems[$upd.Index]
                 $s    = $upd.Status
+                # Verdict: interpret the status as reachability, not pass/fail. A
+                # service that answers with an auth challenge or a redirect is
+                # reachable and healthy — only real server errors / no-connect
+                # are failures. This keeps Exchange Online results (mostly 401 /
+                # 302 / 404 by design) readable instead of an alarming wall of red.
+                if     ($s -eq 200)                 { $verdict = 'OK';                        $col = [System.Drawing.Color]::DarkGreen }
+                elseif ($s -ge 300 -and $s -lt 400) { $verdict = 'Reachable (redirect)';      $col = [System.Drawing.Color]::SeaGreen }
+                elseif ($s -eq 401)                 { $verdict = 'Reachable — auth required';  $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -eq 403)                 { $verdict = 'Reachable — forbidden';      $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -eq 405)                 { $verdict = 'Reachable — needs POST';     $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -eq 404)                 { $verdict = 'Not present';                $col = [System.Drawing.Color]::DimGray }
+                elseif ($s -ge 400 -and $s -lt 500) { $verdict = "Reachable (HTTP $s)";        $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -ge 500)                 { $verdict = 'Server error';               $col = [System.Drawing.Color]::DarkRed }
+                elseif ($s -lt 0)                   { $verdict = 'Unreachable';                $col = [System.Drawing.Color]::Red }
+                else                                { $verdict = "HTTP $s";                    $col = [System.Drawing.Color]::Black }
                 $item.SubItems[2].Text = if ($s -lt 0) { "ERR" } else { "$s" }
-                $item.SubItems[4].Text = $upd.Info
-                $item.ForeColor =
-                    if     ($s -eq 200)                       { [System.Drawing.Color]::DarkGreen }
-                    elseif ($s -ge 300 -and $s -lt 400)       { [System.Drawing.Color]::DarkOrange }
-                    elseif ($s -eq 401)                       { [System.Drawing.Color]::FromArgb(160, 100, 0) }
-                    elseif ($s -ge 400)                       { [System.Drawing.Color]::DarkRed }
-                    elseif ($s -lt 0)                         { [System.Drawing.Color]::Red }
-                    else                                      { [System.Drawing.Color]::Black }
+                $item.SubItems[3].Text = $verdict
+                $item.SubItems[5].Text = $upd.Info
+                $item.ForeColor = $col
             }
         }
         $lblProg.Text = "Tested $($uSync.Tested) of $($uSync.Total)…"
