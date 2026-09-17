@@ -563,6 +563,319 @@ function Get-AutodiscoverUrls {
     return ,$results
 }
 
+function Show-EndpointTestDialog {
+    param($Title, $Entries, $AuthHeader, $UseWinAuth, $NetCred, $IgnoreCert, $Owner, $CsvName = 'endpoint-tests.csv')
+
+    # ── Dialog ───────────────────────────────────────────────────────────────
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = $Title
+    $dlg.ClientSize      = New-Object System.Drawing.Size(952, 490)
+    $dlg.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $dlg.MinimizeBox     = $false
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.Location      = New-Object System.Drawing.Point(0, 0)
+    $lv.Size          = New-Object System.Drawing.Size(952, 444)
+    $lv.Anchor        = ([System.Windows.Forms.AnchorStyles]::Top    -bor
+                          [System.Windows.Forms.AnchorStyles]::Left   -bor
+                          [System.Windows.Forms.AnchorStyles]::Right  -bor
+                          [System.Windows.Forms.AnchorStyles]::Bottom)
+    $lv.View          = [System.Windows.Forms.View]::Details
+    $lv.FullRowSelect = $true
+    $lv.GridLines     = $true
+    $lv.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+    [void]$lv.Columns.Add("Protocol",  68)
+    [void]$lv.Columns.Add("Field",    130)
+    [void]$lv.Columns.Add("Status",    48)
+    [void]$lv.Columns.Add("Result",   150)
+    [void]$lv.Columns.Add("URL",      370)
+    [void]$lv.Columns.Add("Auth / Info", 170)
+
+    # Right-click context menu: copy URL / copy all as CSV
+    $ctxLv     = New-Object System.Windows.Forms.ContextMenuStrip
+    $miCopyUrl = New-Object System.Windows.Forms.ToolStripMenuItem("Copy URL")
+    [void]$ctxLv.Items.Add($miCopyUrl)
+    $miCopyUrl.Add_Click({
+        if ($lv.SelectedItems.Count -gt 0) {
+            [System.Windows.Forms.Clipboard]::SetText($lv.SelectedItems[0].SubItems[4].Text)
+        }
+    })
+    [void]$ctxLv.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miCsvCtx = New-Object System.Windows.Forms.ToolStripMenuItem("Copy all as CSV")
+    [void]$ctxLv.Items.Add($miCsvCtx)
+    $lv.ContextMenuStrip = $ctxLv
+
+    # CSV builder (shared by Copy and Save buttons)
+    $makeCsv = {
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine('"Protocol";"Field";"Status";"Result";"URL";"Auth / Info"')
+        foreach ($row in $lv.Items) {
+            $cols = @(
+                $row.Text,
+                $row.SubItems[1].Text,
+                $row.SubItems[2].Text,
+                $row.SubItems[3].Text,
+                $row.SubItems[4].Text,
+                $row.SubItems[5].Text
+            )
+            $line = ($cols | ForEach-Object { '"' + ($_ -replace '"','""') + '"' }) -join ';'
+            [void]$sb.AppendLine($line)
+        }
+        return $sb.ToString()
+    }
+
+    $lblProg = New-Object System.Windows.Forms.Label
+    $lblProg.Text      = "Connecting…"
+    $lblProg.Location  = New-Object System.Drawing.Point(8, 457)
+    $lblProg.Size      = New-Object System.Drawing.Size(590, 18)
+    $lblProg.Anchor    = ([System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $lblProg.ForeColor = [System.Drawing.Color]::Gray
+
+    $btnSaveCsv = New-Object System.Windows.Forms.Button
+    $btnSaveCsv.Text     = "Save CSV…"
+    $btnSaveCsv.Location = New-Object System.Drawing.Point(688, 453)
+    $btnSaveCsv.Size     = New-Object System.Drawing.Size(80, 26)
+    $btnSaveCsv.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $btnSaveCsv.Add_Click({
+        $csv = & $makeCsv
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter   = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+        $sfd.FileName = $CsvName
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            [System.IO.File]::WriteAllText($sfd.FileName, $csv, [System.Text.Encoding]::UTF8)
+        }
+    })
+
+    $btnCopyCsv = New-Object System.Windows.Forms.Button
+    $btnCopyCsv.Text     = "Copy CSV"
+    $btnCopyCsv.Location = New-Object System.Drawing.Point(776, 453)
+    $btnCopyCsv.Size     = New-Object System.Drawing.Size(80, 26)
+    $btnCopyCsv.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $btnCopyCsv.Add_Click({
+        $csv = & $makeCsv
+        [System.Windows.Forms.Clipboard]::SetText($csv)
+    })
+
+    $miCsvCtx.Add_Click({ $btnCopyCsv.PerformClick() })
+
+    $btnDlgClose = New-Object System.Windows.Forms.Button
+    $btnDlgClose.Text     = "Close"
+    $btnDlgClose.Location = New-Object System.Drawing.Point(864, 453)
+    $btnDlgClose.Size     = New-Object System.Drawing.Size(80, 26)
+    $btnDlgClose.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
+    $btnDlgClose.Add_Click({ $dlg.Close() })
+    $dlg.CancelButton = $btnDlgClose
+
+    $dlg.Controls.AddRange(@($lv, $lblProg, $btnSaveCsv, $btnCopyCsv, $btnDlgClose))
+
+    # Pre-populate rows with placeholder status. Key by index, not URL, because
+    # the same URL can legitimately appear under several protocol sections.
+    $lvItems = @{}
+    for ($i = 0; $i -lt $Entries.Count; $i++) {
+        $entry = $Entries[$i]
+        $entry | Add-Member -NotePropertyName Index -NotePropertyValue $i -Force
+        $item = New-Object System.Windows.Forms.ListViewItem($entry.Protocol)
+        [void]$item.SubItems.Add($entry.Field)
+        [void]$item.SubItems.Add("…")   # Status
+        [void]$item.SubItems.Add("")     # Result
+        [void]$item.SubItems.Add($entry.Url)
+        [void]$item.SubItems.Add("")     # Auth / Info
+        $item.ForeColor = [System.Drawing.Color]::Gray
+        [void]$lv.Items.Add($item)
+        $lvItems[$i] = $item
+    }
+
+    # Sync bridge for runspace → UI
+    $uSync = [hashtable]::Synchronized(@{
+        Queue  = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+        Done   = $false
+        Cancel = $false
+        Tested = 0
+        Total  = $Entries.Count
+    })
+
+    # Background runspace: probe each URL with the selected auth method
+    $uRs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $uRs.ApartmentState = [System.Threading.ApartmentState]::STA
+    $uRs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+    $uRs.Open()
+    $uRs.SessionStateProxy.SetVariable('uSync',      $uSync)
+    $uRs.SessionStateProxy.SetVariable('urlList',    $Entries)
+    $uRs.SessionStateProxy.SetVariable('ignoreCert', $IgnoreCert)
+    $uRs.SessionStateProxy.SetVariable('authHeader', $AuthHeader)
+    $uRs.SessionStateProxy.SetVariable('useWinAuth', $UseWinAuth)
+    $uRs.SessionStateProxy.SetVariable('netCred',    $NetCred)
+
+    $uPs = [System.Management.Automation.PowerShell]::Create()
+    $uPs.Runspace = $uRs
+    [void]$uPs.AddScript({
+        if ($ignoreCert) {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        }
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.SecurityProtocolType]::Tls12 -bor
+            [System.Net.SecurityProtocolType]::Tls11 -bor
+            [System.Net.SecurityProtocolType]::Tls
+
+        foreach ($entry in $urlList) {
+            if ($uSync.Cancel) { break }
+            $url    = $entry.Url
+            $idx    = $entry.Index
+            $status = 0
+            $info   = ''
+            try {
+                $req = [System.Net.HttpWebRequest]::Create($url)
+                $req.Method            = "GET"
+                $req.AllowAutoRedirect = $false
+                $req.Timeout           = 10000
+                # Use a browser-like User-Agent and Accept header. The MAPI/HTTP
+                # endpoints (/mapi/emsmdb, /mapi/nspi) serve their friendly
+                # "Connectivity Endpoint" HTML page (HTTP 200) to browsers, but
+                # return HTTP 500 to an Office User-Agent because the server then
+                # routes the request into the MAPI handler, which expects a POST.
+                $req.UserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                $req.Accept            = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                if ($authHeader) {
+                    $req.Headers["Authorization"] = $authHeader
+                } elseif ($useWinAuth) {
+                    $req.UseDefaultCredentials = $true
+                } elseif ($netCred) {
+                    $req.Credentials = $netCred
+                }
+                try {
+                    $rp     = $req.GetResponse()
+                    $status = [int]$rp.StatusCode
+                    $loc    = $rp.Headers["Location"]
+                    if ($loc) { $info = "-> $loc" }
+                    $rp.Close()
+                } catch [System.Net.WebException] {
+                    $ex = $_.Exception
+                    if ($ex.Response) {
+                        $status = [int]$ex.Response.StatusCode
+                        $loc    = $ex.Response.Headers["Location"]
+                        $wwwA   = try { $ex.Response.Headers.GetValues("WWW-Authenticate") -join " | " } catch { $null }
+                        if ($wwwA)    { $info = $wwwA }
+                        elseif ($loc) { $info = "-> $loc" }
+                        $ex.Response.Close()
+                    } else {
+                        $status = -1
+                        $inner  = $ex.InnerException
+                        $info   = if ($inner -and $inner.Message) { $inner.Message } else { $ex.Message }
+                    }
+                }
+            } catch {
+                $status = -1
+                $info   = $_.Exception.Message
+            }
+            $uSync.Queue.Enqueue(@{ Index = $idx; Status = $status; Info = $info })
+            $uSync.Tested++
+        }
+        $uSync.Done = $true
+    })
+    [void]$uPs.BeginInvoke()
+
+    # Timer: drain result queue and update ListView on UI thread
+    $uTimer = New-Object System.Windows.Forms.Timer
+    $uTimer.Interval = 150
+    $uTimer.Add_Tick({
+        $upd = $null
+        while ($uSync.Queue.TryDequeue([ref]$upd)) {
+            if ($lvItems.ContainsKey($upd.Index)) {
+                $item = $lvItems[$upd.Index]
+                $s    = $upd.Status
+                # Verdict: interpret the status as reachability, not pass/fail. A
+                # service that answers with an auth challenge or a redirect is
+                # reachable and healthy — only real server errors / no-connect
+                # are failures. This keeps Exchange Online results (mostly 401 /
+                # 302 / 404 by design) readable instead of an alarming wall of red.
+                if     ($s -eq 200)                 { $verdict = 'OK';                        $col = [System.Drawing.Color]::DarkGreen }
+                elseif ($s -ge 300 -and $s -lt 400) { $verdict = 'Reachable (redirect)';      $col = [System.Drawing.Color]::SeaGreen }
+                elseif ($s -eq 401)                 { $verdict = 'Reachable — auth required';  $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -eq 403)                 { $verdict = 'Reachable — forbidden';      $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -eq 405)                 { $verdict = 'Reachable — needs POST';     $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -eq 404)                 { $verdict = 'Not present';                $col = [System.Drawing.Color]::DimGray }
+                elseif ($s -ge 400 -and $s -lt 500) { $verdict = "Reachable (HTTP $s)";        $col = [System.Drawing.Color]::FromArgb(160,100,0) }
+                elseif ($s -ge 500)                 { $verdict = 'Server error';               $col = [System.Drawing.Color]::DarkRed }
+                elseif ($s -lt 0)                   { $verdict = 'Unreachable';                $col = [System.Drawing.Color]::Red }
+                else                                { $verdict = "HTTP $s";                    $col = [System.Drawing.Color]::Black }
+                $item.SubItems[2].Text = if ($s -lt 0) { "ERR" } else { "$s" }
+                $item.SubItems[3].Text = $verdict
+                $item.SubItems[5].Text = $upd.Info
+                $item.ForeColor = $col
+            }
+        }
+        $lblProg.Text = "Tested $($uSync.Tested) of $($uSync.Total)…"
+        if ($uSync.Done) {
+            $uTimer.Stop()
+            $lblProg.Text      = "Done  —  $($uSync.Total) URL(s) tested."
+            $lblProg.ForeColor = [System.Drawing.Color]::Black
+            try { $uPs.Dispose() } catch {}
+            try { $uRs.Close(); $uRs.Dispose() } catch {}
+        }
+    })
+
+    $dlg.Add_FormClosed({
+        $uSync.Cancel = $true
+        $uTimer.Stop()
+        try { $uPs.Stop() }    catch {}
+        try { $uPs.Dispose() } catch {}
+        try { $uRs.Close(); $uRs.Dispose() } catch {}
+    })
+
+    $uTimer.Start()
+    [void]$dlg.ShowDialog($Owner)
+    $uTimer.Stop()
+    try { $uTimer.Dispose() } catch {}
+}
+
+# Build the endpoint list for the Hybrid Connectivity test: AutoDiscover
+# (on-prem + Exchange Online), OAuth/modern-auth metadata, free/busy (EWS),
+# and per-vdir healthcheck.htm on the on-prem host.
+function Get-HybridConnectivityEndpoints {
+    param([string]$Email, [string]$OnPremHost)
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $add = {
+        param([string]$cat, [string]$label, [string]$url)
+        if ($url) { $results.Add([PSCustomObject]@{ Protocol = $cat; Field = $label; Url = $url }) }
+    }
+
+    $domain = ''
+    if ($Email -match '@([^@\s]+)$') { $domain = $Matches[1] }
+    if (-not $OnPremHost -and $domain) { $OnPremHost = "autodiscover.$domain" }
+
+    # AutoDiscover — on-prem and Exchange Online
+    if ($domain) {
+        & $add 'AutoDiscover' "On-prem (autodiscover.$domain)" "https://autodiscover.$domain/autodiscover/autodiscover.xml"
+        & $add 'AutoDiscover' 'On-prem (root domain)'          "https://$domain/autodiscover/autodiscover.xml"
+    }
+    & $add 'AutoDiscover' 'Exchange Online (V1)' 'https://outlook.office365.com/autodiscover/autodiscover.xml'
+    if ($Email) {
+        & $add 'AutoDiscover' 'Exchange Online (V2 JSON)' `
+            "https://outlook.office365.com/autodiscover/autodiscover.json?Email=$([Uri]::EscapeDataString($Email))&Protocol=Autodiscoverv1"
+    }
+
+    # OAuth / modern-auth metadata (hybrid modern authentication)
+    if ($domain) {
+        & $add 'OAuth' 'On-prem auth metadata' "https://autodiscover.$domain/autodiscover/metadata/json/1"
+        & $add 'OAuth' 'Tenant OpenID config'  "https://login.microsoftonline.com/$domain/.well-known/openid-configuration"
+    }
+
+    # Free/Busy federation runs over EWS
+    if ($OnPremHost) { & $add 'EWS' 'On-prem EWS'        "https://$OnPremHost/EWS/Exchange.asmx" }
+    & $add 'EWS' 'Exchange Online EWS' 'https://outlook.office365.com/EWS/Exchange.asmx'
+
+    # Per-vdir healthcheck.htm on the on-prem host
+    if ($OnPremHost) {
+        foreach ($vd in @('autodiscover','ews','oab','owa','ecp','mapi','rpc','Microsoft-Server-ActiveSync')) {
+            & $add 'Health' $vd "https://$OnPremHost/$vd/healthcheck.htm"
+        }
+    }
+
+    return ,$results
+}
+
 #endregion ===================================================================
 #  TEST ENGINE  (PowerShell Runspace + WinForms Timer — avoids ThreadPool runspace issue)
 #==============================================================================
@@ -2133,267 +2446,7 @@ $btnAddTests.Add_Click({
         }
     }
 
-    # ── Dialog ───────────────────────────────────────────────────────────────
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text            = "Additional Tests  —  URL Connectivity"
-    $dlg.ClientSize      = New-Object System.Drawing.Size(952, 490)
-    $dlg.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterParent
-    $dlg.MinimizeBox     = $false
-    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
-
-    $lv = New-Object System.Windows.Forms.ListView
-    $lv.Location      = New-Object System.Drawing.Point(0, 0)
-    $lv.Size          = New-Object System.Drawing.Size(952, 444)
-    $lv.Anchor        = ([System.Windows.Forms.AnchorStyles]::Top    -bor
-                          [System.Windows.Forms.AnchorStyles]::Left   -bor
-                          [System.Windows.Forms.AnchorStyles]::Right  -bor
-                          [System.Windows.Forms.AnchorStyles]::Bottom)
-    $lv.View          = [System.Windows.Forms.View]::Details
-    $lv.FullRowSelect = $true
-    $lv.GridLines     = $true
-    $lv.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
-    [void]$lv.Columns.Add("Protocol",  68)
-    [void]$lv.Columns.Add("Field",    130)
-    [void]$lv.Columns.Add("Status",    48)
-    [void]$lv.Columns.Add("Result",   150)
-    [void]$lv.Columns.Add("URL",      370)
-    [void]$lv.Columns.Add("Auth / Info", 170)
-
-    # Right-click context menu: copy URL / copy all as CSV
-    $ctxLv     = New-Object System.Windows.Forms.ContextMenuStrip
-    $miCopyUrl = New-Object System.Windows.Forms.ToolStripMenuItem("Copy URL")
-    [void]$ctxLv.Items.Add($miCopyUrl)
-    $miCopyUrl.Add_Click({
-        if ($lv.SelectedItems.Count -gt 0) {
-            [System.Windows.Forms.Clipboard]::SetText($lv.SelectedItems[0].SubItems[4].Text)
-        }
-    })
-    [void]$ctxLv.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-    $miCsvCtx = New-Object System.Windows.Forms.ToolStripMenuItem("Copy all as CSV")
-    [void]$ctxLv.Items.Add($miCsvCtx)
-    $lv.ContextMenuStrip = $ctxLv
-
-    # CSV builder (shared by Copy and Save buttons)
-    $makeCsv = {
-        $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine('"Protocol";"Field";"Status";"Result";"URL";"Auth / Info"')
-        foreach ($row in $lv.Items) {
-            $cols = @(
-                $row.Text,
-                $row.SubItems[1].Text,
-                $row.SubItems[2].Text,
-                $row.SubItems[3].Text,
-                $row.SubItems[4].Text,
-                $row.SubItems[5].Text
-            )
-            $line = ($cols | ForEach-Object { '"' + ($_ -replace '"','""') + '"' }) -join ';'
-            [void]$sb.AppendLine($line)
-        }
-        return $sb.ToString()
-    }
-
-    $lblProg = New-Object System.Windows.Forms.Label
-    $lblProg.Text      = "Connecting…"
-    $lblProg.Location  = New-Object System.Drawing.Point(8, 457)
-    $lblProg.Size      = New-Object System.Drawing.Size(590, 18)
-    $lblProg.Anchor    = ([System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Bottom)
-    $lblProg.ForeColor = [System.Drawing.Color]::Gray
-
-    $btnSaveCsv = New-Object System.Windows.Forms.Button
-    $btnSaveCsv.Text     = "Save CSV…"
-    $btnSaveCsv.Location = New-Object System.Drawing.Point(688, 453)
-    $btnSaveCsv.Size     = New-Object System.Drawing.Size(80, 26)
-    $btnSaveCsv.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
-    $btnSaveCsv.Add_Click({
-        $csv = & $makeCsv
-        $sfd = New-Object System.Windows.Forms.SaveFileDialog
-        $sfd.Filter   = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
-        $sfd.FileName = "additional-tests.csv"
-        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            [System.IO.File]::WriteAllText($sfd.FileName, $csv, [System.Text.Encoding]::UTF8)
-        }
-    })
-
-    $btnCopyCsv = New-Object System.Windows.Forms.Button
-    $btnCopyCsv.Text     = "Copy CSV"
-    $btnCopyCsv.Location = New-Object System.Drawing.Point(776, 453)
-    $btnCopyCsv.Size     = New-Object System.Drawing.Size(80, 26)
-    $btnCopyCsv.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
-    $btnCopyCsv.Add_Click({
-        $csv = & $makeCsv
-        [System.Windows.Forms.Clipboard]::SetText($csv)
-    })
-
-    $miCsvCtx.Add_Click({ $btnCopyCsv.PerformClick() })
-
-    $btnDlgClose = New-Object System.Windows.Forms.Button
-    $btnDlgClose.Text     = "Close"
-    $btnDlgClose.Location = New-Object System.Drawing.Point(864, 453)
-    $btnDlgClose.Size     = New-Object System.Drawing.Size(80, 26)
-    $btnDlgClose.Anchor   = ([System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom)
-    $btnDlgClose.Add_Click({ $dlg.Close() })
-    $dlg.CancelButton = $btnDlgClose
-
-    $dlg.Controls.AddRange(@($lv, $lblProg, $btnSaveCsv, $btnCopyCsv, $btnDlgClose))
-
-    # Pre-populate rows with placeholder status. Key by index, not URL, because
-    # the same URL can legitimately appear under several protocol sections.
-    $lvItems = @{}
-    for ($i = 0; $i -lt $urlList.Count; $i++) {
-        $entry = $urlList[$i]
-        $entry | Add-Member -NotePropertyName Index -NotePropertyValue $i -Force
-        $item = New-Object System.Windows.Forms.ListViewItem($entry.Protocol)
-        [void]$item.SubItems.Add($entry.Field)
-        [void]$item.SubItems.Add("…")   # Status
-        [void]$item.SubItems.Add("")     # Result
-        [void]$item.SubItems.Add($entry.Url)
-        [void]$item.SubItems.Add("")     # Auth / Info
-        $item.ForeColor = [System.Drawing.Color]::Gray
-        [void]$lv.Items.Add($item)
-        $lvItems[$i] = $item
-    }
-
-    # Sync bridge for runspace → UI
-    $uSync = [hashtable]::Synchronized(@{
-        Queue  = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
-        Done   = $false
-        Cancel = $false
-        Tested = 0
-        Total  = $urlList.Count
-    })
-
-    # Background runspace: probe each URL with the selected auth method
-    $uRs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $uRs.ApartmentState = [System.Threading.ApartmentState]::STA
-    $uRs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
-    $uRs.Open()
-    $uRs.SessionStateProxy.SetVariable('uSync',      $uSync)
-    $uRs.SessionStateProxy.SetVariable('urlList',    $urlList)
-    $uRs.SessionStateProxy.SetVariable('ignoreCert', $ignoreCert)
-    $uRs.SessionStateProxy.SetVariable('authHeader', $authHeader)
-    $uRs.SessionStateProxy.SetVariable('useWinAuth', $useWinAuth)
-    $uRs.SessionStateProxy.SetVariable('netCred',    $netCred)
-
-    $uPs = [System.Management.Automation.PowerShell]::Create()
-    $uPs.Runspace = $uRs
-    [void]$uPs.AddScript({
-        if ($ignoreCert) {
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-        }
-        [System.Net.ServicePointManager]::SecurityProtocol =
-            [System.Net.SecurityProtocolType]::Tls12 -bor
-            [System.Net.SecurityProtocolType]::Tls11 -bor
-            [System.Net.SecurityProtocolType]::Tls
-
-        foreach ($entry in $urlList) {
-            if ($uSync.Cancel) { break }
-            $url    = $entry.Url
-            $idx    = $entry.Index
-            $status = 0
-            $info   = ''
-            try {
-                $req = [System.Net.HttpWebRequest]::Create($url)
-                $req.Method            = "GET"
-                $req.AllowAutoRedirect = $false
-                $req.Timeout           = 10000
-                # Use a browser-like User-Agent and Accept header. The MAPI/HTTP
-                # endpoints (/mapi/emsmdb, /mapi/nspi) serve their friendly
-                # "Connectivity Endpoint" HTML page (HTTP 200) to browsers, but
-                # return HTTP 500 to an Office User-Agent because the server then
-                # routes the request into the MAPI handler, which expects a POST.
-                $req.UserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                $req.Accept            = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                if ($authHeader) {
-                    $req.Headers["Authorization"] = $authHeader
-                } elseif ($useWinAuth) {
-                    $req.UseDefaultCredentials = $true
-                } elseif ($netCred) {
-                    $req.Credentials = $netCred
-                }
-                try {
-                    $rp     = $req.GetResponse()
-                    $status = [int]$rp.StatusCode
-                    $loc    = $rp.Headers["Location"]
-                    if ($loc) { $info = "-> $loc" }
-                    $rp.Close()
-                } catch [System.Net.WebException] {
-                    $ex = $_.Exception
-                    if ($ex.Response) {
-                        $status = [int]$ex.Response.StatusCode
-                        $loc    = $ex.Response.Headers["Location"]
-                        $wwwA   = try { $ex.Response.Headers.GetValues("WWW-Authenticate") -join " | " } catch { $null }
-                        if ($wwwA)    { $info = $wwwA }
-                        elseif ($loc) { $info = "-> $loc" }
-                        $ex.Response.Close()
-                    } else {
-                        $status = -1
-                        $inner  = $ex.InnerException
-                        $info   = if ($inner -and $inner.Message) { $inner.Message } else { $ex.Message }
-                    }
-                }
-            } catch {
-                $status = -1
-                $info   = $_.Exception.Message
-            }
-            $uSync.Queue.Enqueue(@{ Index = $idx; Status = $status; Info = $info })
-            $uSync.Tested++
-        }
-        $uSync.Done = $true
-    })
-    [void]$uPs.BeginInvoke()
-
-    # Timer: drain result queue and update ListView on UI thread
-    $uTimer = New-Object System.Windows.Forms.Timer
-    $uTimer.Interval = 150
-    $uTimer.Add_Tick({
-        $upd = $null
-        while ($uSync.Queue.TryDequeue([ref]$upd)) {
-            if ($lvItems.ContainsKey($upd.Index)) {
-                $item = $lvItems[$upd.Index]
-                $s    = $upd.Status
-                # Verdict: interpret the status as reachability, not pass/fail. A
-                # service that answers with an auth challenge or a redirect is
-                # reachable and healthy — only real server errors / no-connect
-                # are failures. This keeps Exchange Online results (mostly 401 /
-                # 302 / 404 by design) readable instead of an alarming wall of red.
-                if     ($s -eq 200)                 { $verdict = 'OK';                        $col = [System.Drawing.Color]::DarkGreen }
-                elseif ($s -ge 300 -and $s -lt 400) { $verdict = 'Reachable (redirect)';      $col = [System.Drawing.Color]::SeaGreen }
-                elseif ($s -eq 401)                 { $verdict = 'Reachable — auth required';  $col = [System.Drawing.Color]::FromArgb(160,100,0) }
-                elseif ($s -eq 403)                 { $verdict = 'Reachable — forbidden';      $col = [System.Drawing.Color]::FromArgb(160,100,0) }
-                elseif ($s -eq 405)                 { $verdict = 'Reachable — needs POST';     $col = [System.Drawing.Color]::FromArgb(160,100,0) }
-                elseif ($s -eq 404)                 { $verdict = 'Not present';                $col = [System.Drawing.Color]::DimGray }
-                elseif ($s -ge 400 -and $s -lt 500) { $verdict = "Reachable (HTTP $s)";        $col = [System.Drawing.Color]::FromArgb(160,100,0) }
-                elseif ($s -ge 500)                 { $verdict = 'Server error';               $col = [System.Drawing.Color]::DarkRed }
-                elseif ($s -lt 0)                   { $verdict = 'Unreachable';                $col = [System.Drawing.Color]::Red }
-                else                                { $verdict = "HTTP $s";                    $col = [System.Drawing.Color]::Black }
-                $item.SubItems[2].Text = if ($s -lt 0) { "ERR" } else { "$s" }
-                $item.SubItems[3].Text = $verdict
-                $item.SubItems[5].Text = $upd.Info
-                $item.ForeColor = $col
-            }
-        }
-        $lblProg.Text = "Tested $($uSync.Tested) of $($uSync.Total)…"
-        if ($uSync.Done) {
-            $uTimer.Stop()
-            $lblProg.Text      = "Done  —  $($uSync.Total) URL(s) tested."
-            $lblProg.ForeColor = [System.Drawing.Color]::Black
-            try { $uPs.Dispose() } catch {}
-            try { $uRs.Close(); $uRs.Dispose() } catch {}
-        }
-    })
-
-    $dlg.Add_FormClosed({
-        $uSync.Cancel = $true
-        $uTimer.Stop()
-        try { $uPs.Stop() }    catch {}
-        try { $uPs.Dispose() } catch {}
-        try { $uRs.Close(); $uRs.Dispose() } catch {}
-    })
-
-    $uTimer.Start()
-    [void]$dlg.ShowDialog($form)
-    $uTimer.Stop()
-    try { $uTimer.Dispose() } catch {}
+    Show-EndpointTestDialog -Title "Additional Tests  —  URL Connectivity" -Entries $urlList -AuthHeader $authHeader -UseWinAuth $useWinAuth -NetCred $netCred -IgnoreCert $ignoreCert -Owner $form -CsvName 'additional-tests.csv'
 })
 
 $form.Add_FormClosing({
@@ -3406,12 +3459,117 @@ if ($upn) {
 }
 
 #region ======================================================================
+#  HYBRID CONNECTIVITY TEST  (AutoDiscover / OAuth / Free-Busy / Health)
+#==============================================================================
+
+$hcForm = New-Object System.Windows.Forms.Form
+$hcForm.Text            = "Hybrid Connectivity  —  AutoDiscover · OAuth · Free/Busy · Health"
+$hcForm.ClientSize      = New-Object System.Drawing.Size(620, 150)
+$hcForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$hcForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+$hcForm.MaximizeBox     = $false
+$hcForm.MinimizeBox     = $true
+
+$hcLblEmail = New-Object System.Windows.Forms.Label
+$hcLblEmail.Text      = "E-Mail Address"
+$hcLblEmail.Location  = New-Object System.Drawing.Point(8, 14)
+$hcLblEmail.Size      = New-Object System.Drawing.Size(120, 20)
+$hcLblEmail.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hcForm.Controls.Add($hcLblEmail)
+
+$hcTxtEmail = New-Object System.Windows.Forms.TextBox
+$hcTxtEmail.Location = New-Object System.Drawing.Point(134, 11)
+$hcTxtEmail.Size     = New-Object System.Drawing.Size(478, 22)
+$hcTxtEmail.TabIndex = 0
+$hcForm.Controls.Add($hcTxtEmail)
+
+$hcLblHost = New-Object System.Windows.Forms.Label
+$hcLblHost.Text      = "On-Prem Host"
+$hcLblHost.Location  = New-Object System.Drawing.Point(8, 42)
+$hcLblHost.Size      = New-Object System.Drawing.Size(120, 20)
+$hcLblHost.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hcForm.Controls.Add($hcLblHost)
+
+$hcTxtHost = New-Object System.Windows.Forms.TextBox
+$hcTxtHost.Location = New-Object System.Drawing.Point(134, 39)
+$hcTxtHost.Size     = New-Object System.Drawing.Size(280, 22)
+$hcTxtHost.TabIndex = 1
+$hcForm.Controls.Add($hcTxtHost)
+
+$hcLblHostHint = New-Object System.Windows.Forms.Label
+$hcLblHostHint.Text      = "(optional; defaults to autodiscover.<domain>)"
+$hcLblHostHint.Location  = New-Object System.Drawing.Point(420, 42)
+$hcLblHostHint.Size      = New-Object System.Drawing.Size(192, 20)
+$hcLblHostHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$hcLblHostHint.ForeColor = [System.Drawing.Color]::Gray
+$hcForm.Controls.Add($hcLblHostHint)
+
+$hcChkIgnore = New-Object System.Windows.Forms.CheckBox
+$hcChkIgnore.Text     = "Ignore certificate errors"
+$hcChkIgnore.Location = New-Object System.Drawing.Point(134, 68)
+$hcChkIgnore.Size     = New-Object System.Drawing.Size(220, 20)
+$hcChkIgnore.TabIndex = 2
+$hcForm.Controls.Add($hcChkIgnore)
+
+$hcLblInfo = New-Object System.Windows.Forms.Label
+$hcLblInfo.Text      = "Probes on-prem + Exchange Online endpoints with the current Windows user."
+$hcLblInfo.Location  = New-Object System.Drawing.Point(8, 100)
+$hcLblInfo.Size      = New-Object System.Drawing.Size(430, 34)
+$hcLblInfo.ForeColor = [System.Drawing.Color]::Gray
+$hcForm.Controls.Add($hcLblInfo)
+
+$hcBtnTest = New-Object System.Windows.Forms.Button
+$hcBtnTest.Text     = "Test"
+$hcBtnTest.Location = New-Object System.Drawing.Point(452, 112)
+$hcBtnTest.Size     = New-Object System.Drawing.Size(76, 26)
+$hcBtnTest.TabIndex = 3
+$hcForm.Controls.Add($hcBtnTest)
+$hcForm.AcceptButton = $hcBtnTest
+
+$hcBtnClose = New-Object System.Windows.Forms.Button
+$hcBtnClose.Text     = "Close"
+$hcBtnClose.Location = New-Object System.Drawing.Point(536, 112)
+$hcBtnClose.Size     = New-Object System.Drawing.Size(76, 26)
+$hcBtnClose.TabIndex = 4
+$hcBtnClose.Add_Click({ $hcForm.Close() })
+$hcForm.Controls.Add($hcBtnClose)
+$hcForm.CancelButton = $hcBtnClose
+
+$toolTip.SetToolTip($hcTxtEmail, "Primary SMTP / UPN. Its domain drives on-prem AutoDiscover, OAuth metadata and the tenant OpenID lookup.")
+$toolTip.SetToolTip($hcTxtHost,  "External FQDN of the on-prem Exchange host (e.g. mail.contoso.com). Leave empty to use autodiscover.<domain>.")
+
+$hcBtnTest.Add_Click({
+    $e = $hcTxtEmail.Text.Trim()
+    if ($e -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Please enter a valid e-mail address.", "Input Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+    $entries = Get-HybridConnectivityEndpoints -Email $e -OnPremHost $hcTxtHost.Text.Trim()
+    if ($entries.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No endpoints could be derived.", "Hybrid Connectivity",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+    Show-EndpointTestDialog -Title "Hybrid Connectivity  —  $e" -Entries $entries `
+        -AuthHeader $null -UseWinAuth $true -NetCred $null `
+        -IgnoreCert $hcChkIgnore.Checked -Owner $hcForm -CsvName 'hybrid-connectivity.csv'
+})
+
+if ($upn) { $hcTxtEmail.Text = $upn }
+#endregion
+
+#region ======================================================================
 #  LAUNCHER
 #==============================================================================
 
 $lForm = New-Object System.Windows.Forms.Form
 $lForm.Text            = "Exchange Tester"
-$lForm.ClientSize      = New-Object System.Drawing.Size(408, 184)
+$lForm.ClientSize      = New-Object System.Drawing.Size(408, 254)
 $lForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $lForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $lForm.MaximizeBox     = $false
@@ -3427,23 +3585,31 @@ $lForm.Controls.Add($lLbl)
 $lBtnAuto = New-Object System.Windows.Forms.Button
 $lBtnAuto.Text     = "E-Mail AutoConfiguration`nAutoDiscover test — like Outlook's 'Test E-Mail AutoConfiguration'"
 $lBtnAuto.Location = New-Object System.Drawing.Point(12, 40)
-$lBtnAuto.Size     = New-Object System.Drawing.Size(384, 62)
+$lBtnAuto.Size     = New-Object System.Drawing.Size(384, 58)
 $lBtnAuto.TabIndex = 0
 $lForm.Controls.Add($lBtnAuto)
 
 $lBtnHyb = New-Object System.Windows.Forms.Button
 $lBtnHyb.Text     = "Hybrid Deployment`nMigration endpoint availability — MRS Proxy, on-prem mailbox"
-$lBtnHyb.Location = New-Object System.Drawing.Point(12, 110)
-$lBtnHyb.Size     = New-Object System.Drawing.Size(384, 62)
+$lBtnHyb.Location = New-Object System.Drawing.Point(12, 104)
+$lBtnHyb.Size     = New-Object System.Drawing.Size(384, 58)
 $lBtnHyb.TabIndex = 1
 $lForm.Controls.Add($lBtnHyb)
+
+$lBtnHcon = New-Object System.Windows.Forms.Button
+$lBtnHcon.Text     = "Hybrid Connectivity`nAutoDiscover · OAuth · Free/Busy (EWS) · vdir health — on-prem + EXO"
+$lBtnHcon.Location = New-Object System.Drawing.Point(12, 168)
+$lBtnHcon.Size     = New-Object System.Drawing.Size(384, 58)
+$lBtnHcon.TabIndex = 2
+$lForm.Controls.Add($lBtnHcon)
 
 $script:LauncherChoice = $null
 $lBtnAuto.Add_Click({ $script:LauncherChoice = 'auto';   $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
 $lBtnHyb.Add_Click({  $script:LauncherChoice = 'hybrid'; $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
+$lBtnHcon.Add_Click({ $script:LauncherChoice = 'hcon';   $lForm.DialogResult = [System.Windows.Forms.DialogResult]::OK })
 
 # Launcher loop: closing a test window returns to the launcher; closing the
-# launcher (X) exits. Modal forms are only hidden on close, so both test
+# launcher (X) exits. Modal forms are only hidden on close, so all test
 # windows can be reopened without rebuilding them.
 while ($true) {
     $script:LauncherChoice = $null
@@ -3452,6 +3618,7 @@ while ($true) {
     switch ($script:LauncherChoice) {
         'auto'   { [void]$form.ShowDialog() }
         'hybrid' { [void]$hybForm.ShowDialog() }
+        'hcon'   { [void]$hcForm.ShowDialog() }
     }
 }
 #endregion
