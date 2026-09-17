@@ -3150,7 +3150,7 @@ $script:HybridTestScript = {
     # us definitively whether the MRS proxy is live and enabled.
     if (-not $abort -and -not $sync.Cancel -and ($r2.Code -eq 200 -or $r2.Code -eq 400)) {
         & $setPct 76
-        & $logLine "SOAP probe (POST application/soap+xml) as $who starting."
+        & $logLine "SOAP probe (POST text/xml, SOAP 1.1) as $who starting."
         $probeUser = if ($netCred) { $user } else { '' }
         $probePass = if ($netCred) { $pass } else { '' }
         $rs = & $mrsSoapPost $mrsUrl $probeUser $probePass $sync.IgnoreCert
