@@ -629,10 +629,22 @@ $script:TestScript = {
                     $ex.Response.Close()
                     return @{ Code = $code; Body = $null; Location = $loc; WwwAuth = $wwwAuth; Error = $null }
                 }
-                return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $ex.Message }
+                $emx = $ex.Message
+                if ($ex.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+                    $ex.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure) {
+                    $emx = "TLS/certificate not trusted — enable 'Ignore certificate errors' for on-premises servers with a self-signed or untrusted certificate. ($emx)"
+                }
+                return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $emx }
             }
         } catch {
-            return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $_.Exception.Message }
+            $exo = $_.Exception
+            $emo = $exo.Message
+            if ($exo -is [System.Net.WebException] -and
+                ($exo.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+                 $exo.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure)) {
+                $emo = "TLS/certificate not trusted — enable 'Ignore certificate errors' for on-premises servers with a self-signed or untrusted certificate. ($emo)"
+            }
+            return @{ Code = -1; Body = $null; Location = $null; WwwAuth = $null; Error = $emo }
         }
     }
 
@@ -675,14 +687,38 @@ $script:TestScript = {
 
         if ($sync.UseDeviceCode) {
             # ── Device Code Flow ──────────────────────────────────────────────
-            $authUri = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
+            # Determine the authority. The .default scope cannot be combined with
+            # the /common endpoint (AADSTS50059: no tenant-identifying info), so
+            # resolve a concrete tenant where possible and use a specific EWS
+            # delegated scope. Order: known TenantId → OIDC discovery on the
+            # e-mail domain → /organizations fallback.
+            $tenant = $sync.TenantId
+            if (-not $tenant) {
+                $dom = ($sync.Email -split '@')[1]
+                if ($dom) {
+                    try {
+                        $oidcReq = [System.Net.HttpWebRequest]::Create(
+                            "https://login.microsoftonline.com/$([Uri]::EscapeDataString($dom))/.well-known/openid-configuration")
+                        $oidcReq.Method = "GET"; $oidcReq.Timeout = 8000
+                        $oidcRp = $oidcReq.GetResponse()
+                        $oidcJ  = (New-Object System.IO.StreamReader($oidcRp.GetResponseStream())).ReadToEnd() | ConvertFrom-Json
+                        $oidcRp.Close()
+                        if ($oidcJ.token_endpoint -match '/([0-9a-fA-F-]{36})/') { $tenant = $Matches[1] }
+                    } catch {}
+                }
+            }
+            $authUri = if ($tenant) {
+                "https://login.microsoftonline.com/$([Uri]::EscapeDataString($tenant))/oauth2/v2.0/authorize"
+            } else {
+                'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize'
+            }
             if ($wwwAuthHeader -match 'authorization_uri\s*=\s*"([^"]+)"') {
                 $authUri = $Matches[1] -replace '/oauth2(?:/v2\.0)?/authorize.*', '/oauth2/v2.0/authorize'
             }
             $deviceCodeUrl = $authUri -replace '/authorize', '/devicecode'
             $tokenUrl      = $authUri -replace '/authorize', '/token'
             $clientId      = if ($sync.ClientId) { $sync.ClientId } else { 'd3590ed6-52b3-4102-aeff-aad2292ab01c' }
-            $scope         = 'https://outlook.office365.com/.default offline_access'
+            $scope         = 'https://outlook.office365.com/EWS.AccessAsUser.All offline_access'
 
             & $logLine "Modern Auth: requesting device code…"
 
