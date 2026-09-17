@@ -2489,9 +2489,10 @@ $hybForm = New-Object System.Windows.Forms.Form
 $hybForm.Text            = "Hybrid Deployment  —  Migration Endpoint (MRS Proxy)"
 $hybForm.ClientSize      = New-Object System.Drawing.Size(775, 595)
 $hybForm.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
-$hybForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-$hybForm.MaximizeBox     = $false
+$hybForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+$hybForm.MaximizeBox     = $true
 $hybForm.MinimizeBox     = $true
+$hybForm.MinimumSize     = New-Object System.Drawing.Size(640, 420)
 
 #region --- Row 1: On-prem mailbox ---
 $hybLblEmail = New-Object System.Windows.Forms.Label
@@ -2505,6 +2506,7 @@ $hybTxtEmail = New-Object System.Windows.Forms.TextBox
 $hybTxtEmail.Location = New-Object System.Drawing.Point(140, 11)
 $hybTxtEmail.Size     = New-Object System.Drawing.Size(622, 22)
 $hybTxtEmail.TabIndex = 0
+$hybTxtEmail.Anchor   = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybTxtEmail)
 #endregion
 
@@ -2528,6 +2530,7 @@ $hybLblFqdnHint.Location  = New-Object System.Drawing.Point(486, 42)
 $hybLblFqdnHint.Size      = New-Object System.Drawing.Size(276, 20)
 $hybLblFqdnHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $hybLblFqdnHint.ForeColor = [System.Drawing.Color]::Gray
+$hybLblFqdnHint.Anchor    = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybLblFqdnHint)
 #endregion
 
@@ -2582,6 +2585,7 @@ $hybBtnTest.Text     = "Test"
 $hybBtnTest.Location = New-Object System.Drawing.Point(620, 92)
 $hybBtnTest.Size     = New-Object System.Drawing.Size(68, 26)
 $hybBtnTest.TabIndex = 6
+$hybBtnTest.Anchor   = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybBtnTest)
 $hybForm.AcceptButton = $hybBtnTest
 
@@ -2591,6 +2595,7 @@ $hybBtnCancel.Location = New-Object System.Drawing.Point(696, 92)
 $hybBtnCancel.Size     = New-Object System.Drawing.Size(68, 26)
 $hybBtnCancel.Enabled  = $false
 $hybBtnCancel.TabIndex = 7
+$hybBtnCancel.Anchor   = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybBtnCancel)
 
 $toolTip.SetToolTip($hybTxtEmail, "Primary SMTP address of an on-premises mailbox. Used for AutoDiscover-based endpoint discovery when the FQDN field is empty.")
@@ -2604,6 +2609,7 @@ $hybPnlSep = New-Object System.Windows.Forms.Panel
 $hybPnlSep.Location  = New-Object System.Drawing.Point(0, 126)
 $hybPnlSep.Size      = New-Object System.Drawing.Size(775, 2)
 $hybPnlSep.BackColor = [System.Drawing.SystemColors]::ControlDark
+$hybPnlSep.Anchor    = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybPnlSep)
 
 $hybPrgBar = New-Object System.Windows.Forms.ProgressBar
@@ -2611,11 +2617,13 @@ $hybPrgBar.Location = New-Object System.Drawing.Point(8, 134)
 $hybPrgBar.Size     = New-Object System.Drawing.Size(757, 14)
 $hybPrgBar.Minimum  = 0
 $hybPrgBar.Maximum  = 100
+$hybPrgBar.Anchor   = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybPrgBar)
 
 $hybTabCtrl = New-Object System.Windows.Forms.TabControl
 $hybTabCtrl.Location = New-Object System.Drawing.Point(8, 157)
 $hybTabCtrl.Size     = New-Object System.Drawing.Size(757, 429)
+$hybTabCtrl.Anchor   = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $hybForm.Controls.Add($hybTabCtrl)
 
 $hybTabResults = New-Object System.Windows.Forms.TabPage
@@ -2623,15 +2631,28 @@ $hybTabResults.Text = "Results"
 $hybTabCtrl.Controls.Add($hybTabResults)
 
 $hybLvwResults = New-Object System.Windows.Forms.ListView
-$hybLvwResults.Dock          = [System.Windows.Forms.DockStyle]::Fill
-$hybLvwResults.View          = [System.Windows.Forms.View]::Details
-$hybLvwResults.FullRowSelect = $true
-$hybLvwResults.GridLines     = $true
-$hybLvwResults.HeaderStyle   = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
-[void]$hybLvwResults.Columns.Add("Step",    220)
-[void]$hybLvwResults.Columns.Add("Result",   70)
-[void]$hybLvwResults.Columns.Add("Details", 440)
+$hybLvwResults.Dock            = [System.Windows.Forms.DockStyle]::Fill
+$hybLvwResults.View            = [System.Windows.Forms.View]::Details
+$hybLvwResults.FullRowSelect   = $true
+$hybLvwResults.GridLines       = $true
+$hybLvwResults.ShowItemToolTips = $true
+$hybLvwResults.HeaderStyle     = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+[void]$hybLvwResults.Columns.Add("Step",    200)
+[void]$hybLvwResults.Columns.Add("Result",   60)
+[void]$hybLvwResults.Columns.Add("Details", 900)
 $hybTabResults.Controls.Add($hybLvwResults)
+
+# Double-click a row to read the full details (also copies them to clipboard)
+$hybLvwResults.Add_DoubleClick({
+    if ($hybLvwResults.SelectedItems.Count -gt 0) {
+        $it  = $hybLvwResults.SelectedItems[0]
+        $txt = "$($it.Text)  —  $($it.SubItems[1].Text)`r`n`r`n$($it.SubItems[2].Text)"
+        try { [System.Windows.Forms.Clipboard]::SetText($txt) } catch {}
+        [System.Windows.Forms.MessageBox]::Show($txt, "Step detail (copied to clipboard)",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    }
+})
 
 $hybTabLog = New-Object System.Windows.Forms.TabPage
 $hybTabLog.Text = "Log"
@@ -3319,6 +3340,7 @@ function Add-HybridRow {
     $item = New-Object System.Windows.Forms.ListViewItem($row.Step)
     [void]$item.SubItems.Add($row.Result)
     [void]$item.SubItems.Add($row.Details)
+    $item.ToolTipText = "$($row.Step) — $($row.Result)`r`n$($row.Details)"
     $item.ForeColor = switch ($row.Result) {
         'OK'    { [System.Drawing.Color]::DarkGreen }
         'WARN'  { [System.Drawing.Color]::DarkOrange }
