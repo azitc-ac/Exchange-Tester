@@ -3763,7 +3763,7 @@ if ($upn) { $hcTxtEmail.Text = $upn }
 function New-FreeBusySoap {
     param([string]$Target)
     $start = (Get-Date).Date
-    $end   = $start.AddDays(1)
+    $end   = $start.AddDays(7)
     $s = $start.ToString('yyyy-MM-ddTHH:mm:ss')
     $e = $end.ToString('yyyy-MM-ddTHH:mm:ss')
     return ('<?xml version="1.0" encoding="utf-8"?>' +
@@ -3777,7 +3777,7 @@ function New-FreeBusySoap {
         '<m:MailboxDataArray><t:MailboxData><t:Email><t:Address>' + $Target + '</t:Address></t:Email>' +
         '<t:AttendeeType>Required</t:AttendeeType><t:ExcludeConflicts>false</t:ExcludeConflicts></t:MailboxData></m:MailboxDataArray>' +
         '<t:FreeBusyViewOptions><t:TimeWindow><t:StartTime>' + $s + '</t:StartTime><t:EndTime>' + $e + '</t:EndTime></t:TimeWindow>' +
-        '<t:MergedFreeBusyIntervalInMinutes>60</t:MergedFreeBusyIntervalInMinutes><t:RequestedView>FreeBusy</t:RequestedView></t:FreeBusyViewOptions>' +
+        '<t:MergedFreeBusyIntervalInMinutes>60</t:MergedFreeBusyIntervalInMinutes><t:RequestedView>DetailedMerged</t:RequestedView></t:FreeBusyViewOptions>' +
         '</m:GetUserAvailabilityRequest></soap:Body></soap:Envelope>')
 }
 
@@ -3805,9 +3805,30 @@ function Invoke-FreeBusyProbe {
         if ($body -match '<(?:\w+:)?FreeBusyViewType>([^<]+)<') { $view = $Matches[1] }
         if ($body -match '<(?:\w+:)?MessageText>([^<]+)<')      { $msg = $Matches[1] }
         if ($body -match '<(?:\w+:)?faultstring[^>]*>([^<]+)<') { $fault = $Matches[1] }
-        return @{ Http = $code; ResponseCode = $rc; ViewType = $view; Message = $msg; Fault = $fault; Raw = $body }
+
+        # Merged free/busy map (one digit per interval: 0=free 1=tentative 2=busy 3=OOF 4=elsewhere)
+        $merged = ''; if ($body -match '<(?:\w+:)?MergedFreeBusy>([^<]*)<') { $merged = $Matches[1] }
+        $slotsTotal = $merged.Length
+        $slotsBusy  = ($merged.ToCharArray() | Where-Object { $_ -ne '0' } | Measure-Object).Count
+
+        # Detailed calendar events (only present when the view includes detail)
+        $evLines = New-Object System.Collections.Generic.List[string]
+        foreach ($m in [regex]::Matches($body, '(?s)<(?:\w+:)?CalendarEvent>(.*?)</(?:\w+:)?CalendarEvent>')) {
+            $seg = $m.Groups[1].Value
+            $st = ''; $et = ''; $bt = ''
+            if ($seg -match '<(?:\w+:)?StartTime>([^<]+)<') { $st = $Matches[1] }
+            if ($seg -match '<(?:\w+:)?EndTime>([^<]+)<')   { $et = $Matches[1] }
+            if ($seg -match '<(?:\w+:)?BusyType>([^<]+)<')  { $bt = $Matches[1] }
+            $stShort = ($st -replace 'T', ' '); if ($stShort.Length -ge 16) { $stShort = $stShort.Substring(0,16) }
+            $etShort = ($et -replace '^.*T', ''); if ($etShort.Length -ge 5) { $etShort = $etShort.Substring(0,5) }
+            $evLines.Add(("  {0}–{1}  {2}" -f $stShort, $etShort, $bt))
+        }
+        return @{ Http = $code; ResponseCode = $rc; ViewType = $view; Message = $msg; Fault = $fault; Raw = $body;
+                  Merged = $merged; SlotsTotal = $slotsTotal; SlotsBusy = $slotsBusy;
+                  EventCount = $evLines.Count; Events = ($evLines -join "`r`n") }
     } catch {
-        return @{ Http = -1; ResponseCode = ''; ViewType = ''; Message = ''; Fault = "WinHTTP: $($_.Exception.Message)"; Raw = '' }
+        return @{ Http = -1; ResponseCode = ''; ViewType = ''; Message = ''; Fault = "WinHTTP: $($_.Exception.Message)"; Raw = '';
+                  Merged = ''; SlotsTotal = 0; SlotsBusy = 0; EventCount = 0; Events = '' }
     } finally {
         if ($wh) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wh) }
     }
@@ -3983,11 +4004,19 @@ function Add-FbRow {
         $res = 'FAIL'; $det = "$($R.Fault) $Ctx"
     } elseif ($R.ResponseCode -eq 'NoError') {
         # NoError = the availability request was served (the cross-org path worked).
-        if ($R.ViewType -eq 'None') {
+        # Summarise the actual data returned over the 7-day window.
+        $data = ''
+        if ($R.SlotsTotal -gt 0) { $data = "$($R.SlotsBusy)/$($R.SlotsTotal) hrs busy" }
+        if ($R.EventCount -gt 0) {
+            if ($data) { $data += ", " }
+            $data += "$($R.EventCount) appointment(s) visible"
+        }
+        if ($R.ViewType -eq 'None' -and -not $data) {
             $res = 'WARN'; $det = "Availability lookup succeeded (NoError) but returned no data (view = None) — the target may restrict free/busy detail or sharing is limited. $Ctx"
         } else {
             $vt = if ($R.ViewType) { $R.ViewType } else { 'returned' }
-            $res = 'OK'; $det = "Cross-premises free/busy works — availability retrieved (view = $vt). $Ctx"
+            $sum = if ($data) { " — $data (next 7 days)" } else { '' }
+            $res = 'OK'; $det = "Cross-premises free/busy works — view = $vt$sum. Double-click for the appointment list. $Ctx"
         }
     } elseif ($R.ResponseCode) {
         $extra = if ($R.Message) { " — $($R.Message)" } else { '' }
@@ -4004,7 +4033,13 @@ function Add-FbRow {
     $it = New-Object System.Windows.Forms.ListViewItem($Dir)
     [void]$it.SubItems.Add($res)
     [void]$it.SubItems.Add($det)
-    $it.ToolTipText = "$Ctx`r`n$($R.Raw)"
+    $tip = "$Ctx"
+    if ($R.ViewType)   { $tip += "`r`nView: $($R.ViewType)" }
+    if ($R.SlotsTotal -gt 0) { $tip += "`r`nBusy hours (next 7 days): $($R.SlotsBusy) of $($R.SlotsTotal)" }
+    if ($R.EventCount -gt 0) { $tip += "`r`nAppointments ($($R.EventCount)):`r`n$($R.Events)" }
+    if ($R.Merged)     { $tip += "`r`nFree/Busy map: $($R.Merged)" }
+    $tip += "`r`n`r`n--- raw response ---`r`n$($R.Raw)"
+    $it.ToolTipText = $tip
     $it.ForeColor = switch ($res) {
         'OK'   { [System.Drawing.Color]::DarkGreen }
         'WARN' { [System.Drawing.Color]::DarkOrange }
