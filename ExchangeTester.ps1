@@ -3993,7 +3993,7 @@ function Add-FbRow {
         $extra = if ($R.Message) { " — $($R.Message)" } else { '' }
         $hint = ''
         if ($R.ResponseCode -match 'Proxy' -or "$($R.Message)" -match 'linked account|RBAC|OAuth|partner') {
-            $hint = "  Hint: hybrid OAuth/free-busy authorization issue on the target side — check the OAuth config (IntraOrganizationConnector, AuthServer, partner application / linked account) and run Test-OAuthConnectivity."
+            $hint = "  Hint: hybrid OAuth/free-busy authorization issue on the target side — verify the on-prem OAuth config (IntraOrganizationConnector, AuthServer, and especially the partner application's LinkedAccount / RBAC role assignments); run Test-OAuthConnectivity, and recycle the EWS app pool after any change."
         }
         $res = 'FAIL'; $det = "$($R.ResponseCode)$extra.$hint $Ctx"
     } elseif ($R.Fault) {
